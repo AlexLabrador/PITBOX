@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" width="1200" height="700" role="img" aria-label="Silueta de coche: foto del modelo no disponible">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#12181a"/>
+      <stop offset="1" stop-color="#08090a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="42%" r="52%">
+      <stop offset="0" stop-color="#ff5a1f" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#ff5a1f" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#2a3337" stroke-width="1" opacity=".5"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="700" fill="url(#bg)"/>
+  <rect width="1200" height="700" fill="url(#grid)" opacity=".45"/>
+  <rect width="1200" height="700" fill="url(#glow)"/>
+  <path d="M120 560H1080" stroke="#2a3337" stroke-width="2"/>
+  <g fill="none" stroke="#3d4a50" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M250 520V470c0-18 13-32 31-36l150-30 96-78c16-13 36-20 57-20h160c26 0 51 10 69 29l88 96 96 22c26 6 44 29 44 56v11"/>
+    <path d="M430 402l72-58c10-8 22-12 35-12h142c16 0 31 6 42 18l62 68z"/>
+    <path d="M642 332v70"/>
+  </g>
+  <g fill="#0d1112" stroke="#3d4a50" stroke-width="10">
+    <circle cx="372" cy="520" r="62"/>
+    <circle cx="892" cy="520" r="62"/>
+  </g>
+  <g fill="#1c2427">
+    <circle cx="372" cy="520" r="26"/>
+    <circle cx="892" cy="520" r="26"/>
+  </g>
+  <path d="M276 548h68M822 548h150" stroke="#ff5a1f" stroke-width="6" stroke-linecap="round" opacity=".85"/>
+  <text x="72" y="92" fill="#ff5a1f" font-family="monospace" font-size="20" letter-spacing="4">PITBOX</text>
+  <text x="72" y="118" fill="#5a666b" font-family="monospace" font-size="15" letter-spacing="2">FOTO DEL MODELO NO DISPONIBLE</text>
+</svg>

@@ -93,8 +93,7 @@
     partsQuery: "",
     diagMode: "acoustic",
     diagStage: "idle",
-    diagUnlocked: false,
-    visualPart: "disc",
+    visualPart: "tyre",
     visualStage: "idle",
     selectedPlan: "annual",
     ambientFilter: true,
@@ -103,6 +102,24 @@
     plateValid: false,
     plateDuplicate: false,
     engineChoice: "DNFB",
+    addMode: "catalog",
+    catalogBrand: "",
+    catalogModel: "",
+    catalogBrandCustom: "",
+    catalogModelCustom: "",
+    catalogFuel: "gasolina",
+    catalogVersion: "",
+    catalogYear: "",
+    catalogStep: 0,
+    catalogSearch: { brand: "", model: "", engine: "" },
+    catalogGen: -1,
+    catalogEng: -1,
+    catalogManual: false,
+    catalogCc: "",
+    catalogPower: "",
+    catalogCode: "",
+    catalogGearbox: "",
+    catalogScroll: false,
     micStream: null,
     audioCtx: null,
     analyser: null,
@@ -120,6 +137,20 @@
     recTimer: null,
     audioSummary: null,
     audioEl: null,
+    pcmChunks: [],
+    pcmTotal: 0,
+    processor: null,
+    audioWav: "",
+    audioUploadName: "",
+    aiSymptom: "",
+    aiResult: null,
+    aiError: "",
+    aiBusy: false,
+    aiRound: 0,
+    aiAnswers: {},
+    aiImage: null,
+    aiImageStatus: "idle",
+    aiFollowupBusy: false,
     cameraStream: null,
     cameraLive: false,
     cameraStarting: false,
@@ -129,6 +160,75 @@
     raf: null,
     timers: []
   };
+
+  /* ------------------------------------------------------------------------
+     Fotos de referencia del modelo (Wikimedia Commons)
+     ------------------------------------------------------------------------ */
+  const PLACEHOLDER_IMAGE = "assets/car-placeholder.svg";
+
+  function vehicleImageSrc(v) {
+    return (v && v.photo && v.photo.src) || (v && v.image) || PLACEHOLDER_IMAGE;
+  }
+
+  function vehiclePhotoCreditsHTML(v, variant) {
+    const photo = v && v.photo;
+    const cls = "photo-credit" + (variant ? " photo-credit--" + variant : "");
+    const ready = photo && photo.page && photo.credit;
+    return '<a class="' + cls + '" data-photo-credit="' + esc(v.id) + '"' +
+      (ready ? ' href="' + esc(photo.page) + '" target="_blank" rel="noopener noreferrer" title="Imagen de referencia del modelo · Wikimedia Commons"' : " hidden") +
+      ">" + (ready ? "Imagen de referencia · " + esc(photo.credit) + " · " + esc(photo.license) : "") + "</a>";
+  }
+
+  function vehiclePhotoAttrs(v) {
+    return ' data-vehicle-photo="' + esc(v.id) + '"';
+  }
+
+  function paintVehiclePhoto(v) {
+    if (!v) return;
+    const src = vehicleImageSrc(v);
+    const images = document.querySelectorAll('[data-vehicle-photo="' + v.id + '"]');
+    for (let i = 0; i < images.length; i++) {
+      if (images[i].getAttribute("src") !== src) images[i].setAttribute("src", src);
+    }
+    const credits = document.querySelectorAll('[data-photo-credit="' + v.id + '"]');
+    for (let i = 0; i < credits.length; i++) {
+      const el = credits[i];
+      if (v.photo && v.photo.page && v.photo.credit) {
+        el.setAttribute("href", v.photo.page);
+        el.setAttribute("title", "Imagen de referencia del modelo · Wikimedia Commons");
+        el.textContent = "Imagen de referencia · " + v.photo.credit + " · " + v.photo.license;
+        el.hidden = false;
+      } else {
+        el.removeAttribute("href");
+        el.hidden = true;
+      }
+    }
+  }
+
+  function resolveVehiclePhoto(v) {
+    if (!v || !window.PitBoxCarImage) return;
+    const key = v.photoKey && window.PitBoxCarImage.has(v.photoKey)
+      ? v.photoKey
+      : window.PitBoxCarImage.keyFor(v);
+    if (!key || !window.PitBoxCarImage.has(key)) return;
+    if (v.image === "assets/car-hero.png" && key !== "volkswagen|golf|mk7") {
+      v.image = PLACEHOLDER_IMAGE;
+      save();
+      paintVehiclePhoto(v);
+    }
+    if (v.photo && v.photo.src) { paintVehiclePhoto(v); return; }
+    window.PitBoxCarImage.resolve(key).then((photo) => {
+      if (!photo) return;
+      v.photo = photo;
+      v.photoKey = key;
+      save();
+      paintVehiclePhoto(v);
+    });
+  }
+
+  function hydrateCarPhotos() {
+    state.vehicles.forEach(resolveVehiclePhoto);
+  }
 
   /* ------------------------------------------------------------------------
      Derived data
@@ -215,15 +315,9 @@
         out.push({ kind: "warning", icon: c.icon, title: c.name + ": próximo cambio", meta: fmtKm(s.remaining) + " km restantes · a " + fmtKm(s.next) + " km", component: c.id });
       }
     });
-    if (v.engineCode === "CJXC" && v.components.some((c) => c.id === "chain")) {
-      out.push({
-        kind: "info", icon: "chain", title: "Revisa la cadena a 150.000 km",
-        meta: "Punto débil del CJXC · faltan " + fmtKm(Math.max(0, 150000 - v.km)) + " km",
-        fault: "chain"
-      });
-    }
-    if (v.engineCode === "DETA") {
-      out.push({ kind: "info", icon: "filter", title: "Vigila el DPF en trayectos cortos", meta: "Patrón común en DETA · lectura de ceniza recomendada", fault: "dpf" });
+    const watch = faultsFor(v).find((f) => f.alert);
+    if (watch) {
+      out.push({ kind: "info", icon: watch.icon, title: watch.alert, meta: "Fallo documentado · fuente verificada en la ficha", fault: watch.id });
     }
     return out.slice(0, 4);
   }
@@ -318,6 +412,11 @@
     const rec = ui.recorder;
     ui.recorder = null;
     if (rec && rec.state !== "inactive") { try { rec.stop(); } catch (err) { /* noop */ } }
+    if (ui.processor) {
+      try { ui.processor.disconnect(); } catch (err) { /* noop */ }
+      ui.processor.onaudioprocess = null;
+      ui.processor = null;
+    }
     if (ui.micStream) {
       ui.micStream.getTracks().forEach((track) => track.stop());
       ui.micStream = null;
@@ -372,6 +471,11 @@
       if (ui.diagMode === "acoustic" && ui.diagStage === "recording") startWave();
       if (ui.diagMode === "visual" && ui.cameraLive) attachCameraFeed();
     }
+    if (ui.catalogScroll) {
+      ui.catalogScroll = false;
+      const target = document.querySelector(".car-panel, .car-summary, .car-manual");
+      if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   }
 
   function tabbarHTML(v) {
@@ -406,9 +510,9 @@
       ui.vehicleTab = (params && params.tab) || "resumen";
     }
     if (screen === "diag" && params && params.fault) {
+      resetDiagnosis();
       ui.diagMode = "acoustic";
       ui.diagStage = "idle";
-      ui.diagUnlocked = false;
       ui.params = { fault: params.fault };
     } else {
       ui.params = params || {};
@@ -510,13 +614,64 @@
       "</button>";
   }
 
+  function faultModelKey(v) {
+    let brand = v.brand;
+    let model = v.model;
+    if ((!brand || !model) && v.photoKey) {
+      const parts = v.photoKey.split("|");
+      brand = brand || parts[0];
+      model = model || parts[1];
+    }
+    if (!brand || !model) return "";
+    const norm = (s) => String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+    const target = norm(brand) + "|" + norm(model);
+    return Object.keys(DB.modelFaults).find((k) => {
+      const p = k.split("|");
+      return norm(p[0]) + "|" + norm(p[1]) === target;
+    }) || "";
+  }
+
+  function vehicleModelLabel(v) {
+    if (v.model) return v.model;
+    if (v.photoKey) {
+      const m = v.photoKey.split("|")[1];
+      if (m) return m.charAt(0).toUpperCase() + m.slice(1);
+    }
+    return v.engineCode;
+  }
+
+  function faultsFor(v) {
+    if (!v) return [];
+    const key = faultModelKey(v);
+    const year = parseInt(v.year, 10);
+    const norm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const engine = norm(v.engine);
+    const gearbox = norm(v.gearbox);
+    const matches = (f) => {
+      if (f.gens && v.generationCode && !f.gens.includes(v.generationCode)) return false;
+      if (f.years && year && (year < f.years[0] || year > f.years[1])) return false;
+      if (f.engines && engine && !f.engines.some((e) => engine.includes(norm(e)))) return false;
+      if (f.gear === "auto" && !/(dsg|s tronic|tiptronic|multitronic|auto)/.test(gearbox)) return false;
+      return true;
+    };
+    const all = (key ? DB.modelFaults[key] || [] : []).concat(DB.faults[v.engineCode] || []);
+    const seen = {};
+    return all.filter((f) => matches(f) && !seen[f.id] && (seen[f.id] = 1));
+  }
+
+  function faultSourceHTML(f, compact) {
+    if (!f.source || !f.source.url) return "";
+    return '<a class="fault-src' + (compact ? " fault-src--compact" : "") + '" href="' + esc(f.source.url) + '" target="_blank" rel="noopener noreferrer">' +
+      icon("up-right") + "<span>" + esc(f.source.label) + (f.source.updated ? " · act. " + fmtDate(f.source.updated) : "") + "</span></a>";
+  }
+
   function faultMiniHTML(f) {
     const sev = sevMeta(f.severity);
     return '<button class="fault-mini" data-action="open-fault" data-id="' + f.id + '">' +
       '<div class="fault-mini-top">' + icon(f.icon) + '<span class="tag ' + sev.cls + '">' + sev.label + "</span></div>" +
       "<b>" + esc(f.title) + "</b>" +
       "<span>" + esc(trunc(f.symptom, 58)) + "</span>" +
-      '<div class="mono-label">' + fmtKm(f.cases) + " casos · " + esc(f.band) + "</div>" +
+      '<div class="mono-label">' + (f.source ? "Fuente · " + esc(f.source.label) : "") + "</div>" +
       "</button>";
   }
 
@@ -525,7 +680,7 @@
     const alerts = alertsFor(v);
     const next = nextComponents(v, 3);
     const nearest = nearestPositive(v);
-    const faults = (DB.faults[v.engineCode] || []).slice(0, 3);
+    const faults = faultsFor(v).slice(0, 3);
     const other = state.vehicles.find((x) => x.id !== v.id);
 
     return topbar(v) +
@@ -533,7 +688,7 @@
       "<p>" + state.vehicles.length + " vehículo" + (state.vehicles.length === 1 ? "" : "s") + " · " + fmtKm(v.km) + " km registrados</p></div>" +
 
       '<article class="hero-card" data-action="open-vehicle">' +
-      '<div class="hero-media"><img src="' + v.image + '" alt="' + esc(v.name) + '">' +
+      '<div class="hero-media"><img class="vehicle-photo" src="' + esc(vehicleImageSrc(v)) + '"' + vehiclePhotoAttrs(v) + ' alt="' + esc(v.name) + '">' + vehiclePhotoCreditsHTML(v) +
       '<div class="hero-top"><span class="tag tag--accent">Principal</span>' +
       '<div class="hero-top-actions"><span class="hero-plate"><span>' + esc(v.plate) + "</span></span></div></div>" +
       "</div>" +
@@ -560,12 +715,12 @@
       '<section class="section"><div class="section-head"><span class="section-title">Próximos por km</span><button class="text-btn" data-action="open-vehicle">Ver ficha ' + icon("next") + "</button></div>" +
       '<div class="card card--pad">' + next.map((c) => miniCompHTML(v, c)).join("") + "</div></section>" +
 
-      (faults.length ? '<section class="section"><div class="section-head"><span class="section-title">Fallos comunes · ' + esc(v.engineCode) + '</span><button class="text-btn" data-action="open-vehicle">Ver todos ' + icon("next") + "</button></div>" +
+      (faults.length ? '<section class="section"><div class="section-head"><span class="section-title">Fallos comunes · ' + esc(vehicleModelLabel(v)) + '</span><button class="text-btn" data-action="open-vehicle">Ver todos ' + icon("next") + "</button></div>" +
         '<div class="fault-strip">' + faults.map(faultMiniHTML).join("") + "</div></section>" : "") +
 
       '<section class="section"><div class="section-head"><span class="section-title">Garaje</span><button class="text-btn" data-action="open-add-vehicle">' + icon("plus") + " Añadir</button></div>" +
       (other ? (state.pro || !other.demoLocked
-        ? '<button class="vehicle-pill" data-action="switch-vehicle" data-id="' + other.id + '"><span class="vehicle-thumb"><img src="' + other.image + '" alt=""></span><span class="vehicle-pill-main"><b>' + esc(other.name) + "</b><span>" + esc(other.engineCode) + " · " + fmtKm(other.km) + " km</span></span>" + icon("next") + "</button>"
+        ? '<button class="vehicle-pill" data-action="switch-vehicle" data-id="' + other.id + '"><span class="vehicle-thumb"><img class="vehicle-photo" src="' + esc(vehicleImageSrc(other)) + '"' + vehiclePhotoAttrs(other) + ' alt=""></span><span class="vehicle-pill-main"><b>' + esc(other.name) + "</b><span>" + esc(other.engineCode) + " · " + fmtKm(other.km) + " km</span></span>" + icon("next") + "</button>"
         : '<button class="locked-vehicle" data-action="locked-vehicle"><span class="locked-thumb">' + icon("car") + '</span><span class="locked-main"><b>' + esc(other.name) + "</b><span>" + fmtKm(other.km) + " km · " + esc(other.engineCode) + "</span></span><span class=\"tag tag--accent\">Pro</span></button>")
         : '<button class="locked-vehicle" data-action="open-add-vehicle"><span class="locked-thumb">' + icon("plus") + '</span><span class="locked-main"><b>Añadir vehículo</b><span>Alta por matrícula y perfil de motor</span></span>' + icon("next") + "</button>") +
       "</section>" +
@@ -635,6 +790,7 @@
 
   function renderVehicle(v) {
     const tab = ui.vehicleTab || "resumen";
+    const faultList = faultsFor(v);
     const tabs = [
       ["resumen", "Resumen"], ["componentes", "Componentes"],
       ["fallos", "Fallos"], ["historial", "Libro"]
@@ -645,22 +801,22 @@
         '<div class="comp-list">' + sortedComponents(v).map((c) => componentItemHTML(v, c)).join("") + "</div>" +
         '<div class="form-hint">' + icon("info") + "<span>Los intervalos se recalculan automáticamente al registrar un servicio. Toca un componente para ver referencia, par de apriete y plazo.</span></div>";
     } else if (tab === "fallos") {
-      const faults = DB.faults[v.engineCode] || [];
-      const total = faults.reduce((a, f) => a + f.cases, 0);
-      content = '<div class="card card--pad" style="margin-bottom:8px"><div class="row-between">' +
-        '<div><span class="mono-label">Base de conocimiento · ' + esc(v.engineCode) + '</span>' +
+      const faults = faultsFor(v);
+      content = (faults.length ? '<div class="card card--pad" style="margin-bottom:8px"><div class="row-between">' +
+        '<div><span class="mono-label">Base verificada · ' + esc(v.model || v.name) + ' · ' + esc(v.engineCode) + '</span>' +
         '<b class="h3" style="display:block;margin-top:5px">Fallos documentados</b>' +
-        '<p class="tiny faint" style="margin-top:3px">Alertas cruzadas con tu motor y plataforma.</p></div>' +
-        '<span class="chip">' + fmtKm(total) + " casos</span></div></div>" +
+        '<p class="tiny faint" style="margin-top:3px">Patrones publicados por fuentes técnicas, con enlace a la fuente.</p></div>' +
+        '<span class="chip">' + faults.length + " con fuente</span></div></div>" +
         faults.map((f) => {
           const sev = sevMeta(f.severity);
           return '<article class="fault-card"><div class="fault-top"><span class="fault-ico">' + icon(f.icon) + "</span>" +
             '<div class="fault-top-main"><div class="fault-title-row"><b>' + esc(f.title) + '</b><span class="tag ' + sev.cls + '">' + sev.label + "</span></div>" +
             "<p>" + esc(f.symptom) + "</p></div></div>" +
-            '<div class="fault-foot"><span class="fault-cases"><b>' + fmtKm(f.cases) + "</b> casos · " + esc(f.band) + "</span>" +
+            '<div class="fault-foot"><span class="fault-cases">' + (f.km ? esc(f.km) + " · " : "") + faultSourceHTML(f, true) + "</span>" +
             '<button class="btn btn--sm" data-action="diag-fault" data-id="' + f.id + '">' + icon("mic") + " Diagnosticar</button></div></article>";
         }).join("") +
-        '<div class="disclaimer">' + icon("info") + "<span>Datos agregados de la comunidad y documentación técnica. Un diagnóstico orientativo no sustituye una inspección en taller.</span></div>";
+        '<div class="disclaimer">' + icon("info") + "<span>Fichas elaboradas a partir de fuentes técnicas enlazadas. Un patrón documentado no confirma una avería: la inspección en taller sigue siendo necesaria.</span></div>"
+        : '<div class="empty-state">' + icon("info") + "<b>Sin fallos documentados verificados</b><p>Todavía no hay patrones de avería con fuente técnica publicada para este modelo y año. El diagnóstico acústico sigue disponible.</p></div>");
     } else if (tab === "historial") {
       const list = servicesOf(v);
       content = '<div class="row-between" style="margin-bottom:8px"><span class="mono-label">' + list.length + " registros verificados</span>" +
@@ -673,7 +829,14 @@
         '<section class="section"><div class="section-head"><span class="section-title">Ficha técnica</span><span class="mono-label">VIN + motor</span></div>' +
         '<div class="spec-grid">' +
         '<div class="spec"><span>Motor</span><b>' + esc(v.engine) + "</b></div>" +
+        (v.displacement ? '<div class="spec"><span>Cilindrada</span><b>' + fmtKm(v.displacement) + " cc</b></div>" : "") +
+        '<div class="spec"><span>Potencia</span><b>' + esc(v.power) + "</b></div>" +
+        '<div class="spec"><span>Combustible</span><b>' + esc(v.fuel) + "</b></div>" +
         '<div class="spec"><span>Código motor</span><b>' + esc(v.engineCode) + "</b></div>" +
+        (v.generation ? '<div class="spec"><span>Generación</span><b>' + esc(v.generation) + "</b></div>" : "") +
+        (v.body ? '<div class="spec"><span>Carrocería</span><b>' + esc(v.body) + "</b></div>" : "") +
+        (v.generationYears ? '<div class="spec"><span>Producción</span><b>' + esc(v.generationYears) + "</b></div>" : "") +
+        (v.engineYears ? '<div class="spec"><span>Motorización</span><b>' + esc(v.engineYears) + "</b></div>" : "") +
         '<div class="spec"><span>Plataforma</span><b>' + esc(v.chassis) + "</b></div>" +
         '<div class="spec"><span>Aceite</span><b>' + esc(v.oilSpec) + "</b></div>" +
         '<div class="spec"><span>Cambio</span><b>' + esc(v.gearbox) + "</b></div>" +
@@ -682,18 +845,21 @@
         '<div class="spec"><span>Kilometraje</span><b>' + fmtKm(v.km) + " km</b></div>" +
         "</div></section>" +
         '<section class="section"><div class="engine-banner"><img src="assets/engine-bay.png" alt="Vano motor documentado"><div class="engine-banner-copy"><span class="mono-label">Documentación visual</span><b>' + esc(v.engineCode) + '</b><span>Vano motor · ' + esc(v.engine) + '</span></div></div></section>' +
-        '<section class="section"><div class="section-head"><span class="section-title">Fallos comunes</span><button class="text-btn" data-action="vehicle-tab" data-tab="fallos">Ver ' + (DB.faults[v.engineCode] || []).length + " " + icon("next") + "</button></div>" +
-        '<div class="fault-strip">' + (DB.faults[v.engineCode] || []).slice(0, 3).map(faultMiniHTML).join("") + "</div></section>";
+        (faultList.length
+          ? '<section class="section"><div class="section-head"><span class="section-title">Fallos comunes</span><button class="text-btn" data-action="vehicle-tab" data-tab="fallos">Ver ' + faultList.length + " " + icon("next") + "</button></div>" +
+            '<div class="fault-strip">' + faultList.slice(0, 3).map(faultMiniHTML).join("") + "</div></section>"
+          : '<section class="section"><div class="section-head"><span class="section-title">Fallos comunes</span><span class="mono-label">Perfil genérico</span></div>' +
+            '<div class="card card--pad"><p class="tiny faint">Sin patrones de avería documentados para este perfil. El diagnóstico acústico sigue disponible con patrones genéricos.</p></div></section>');
     }
 
     return '<div class="screen-head"><button class="icon-btn" data-action="back" aria-label="Atrás">' + icon("back") + "</button>" +
       '<div class="head-main"><div class="eyebrow">Ficha · ' + esc(v.engineCode) + "</div><h1 class=\"screen-title\">" + esc(v.name) + "</h1></div>" +
       '<div class="head-actions"><button class="icon-btn" data-action="edit-vehicle" aria-label="Editar">' + icon("edit") + "</button></div></div>" +
 
-      '<div class="vehicle-banner"><img src="' + v.image + '" alt="' + esc(v.name) + '">' +
+      '<div class="vehicle-banner"><img class="vehicle-photo" src="' + esc(vehicleImageSrc(v)) + '"' + vehiclePhotoAttrs(v) + ' alt="' + esc(v.name) + '">' +
       '<div class="vehicle-banner-top"><span class="tag tag--glass">' + esc(v.plate) + '</span><span class="tag tag--glass">' + esc(v.engineCode) + "</span></div>" +
       '<div class="vehicle-banner-body"><div><div class="h2">' + fmtKm(v.km) + ' <span style="font-size:14px;color:var(--faint)">km</span></div><div class="mono-label">' + esc(v.engine) + " · " + v.year + "</div></div>" +
-      '<span class="chip">' + esc(v.power) + "</span></div></div>" +
+      '<span class="chip">' + esc(v.power) + "</span></div></div>" + vehiclePhotoCreditsHTML(v, "row") +
 
       '<div class="segment">' + tabs.map(([id, label]) =>
         '<button class="' + (tab === id ? "is-active" : "") + '" data-action="vehicle-tab" data-tab="' + id + '">' + label + "</button>"
@@ -712,12 +878,13 @@
     const filtered = ui.maintenanceFilter === "Todos" ? list : list.filter((s) => s.group === ui.maintenanceFilter);
     const hash = hashFor(v);
     const upnext = nextComponents(v, 4);
+    const reports = (state.diagnoses || []).filter((d) => d.vehicleId === v.id);
 
     return '<div class="screen-head"><div class="head-main"><div class="eyebrow">Libro digital</div><h1 class="screen-title">Mantenimiento</h1></div>' +
       '<div class="head-actions"><button class="icon-btn" data-action="notifications" aria-label="Avisos">' + icon("bell") + "</button></div></div>" +
 
       '<button class="vehicle-pill" data-action="vehicle-switcher">' +
-      '<span class="vehicle-thumb"><img src="' + v.image + '" alt=""></span>' +
+      '<span class="vehicle-thumb"><img class="vehicle-photo" src="' + esc(vehicleImageSrc(v)) + '"' + vehiclePhotoAttrs(v) + ' alt=""></span>' +
       '<span class="vehicle-pill-main"><b>' + esc(v.name) + "</b><span>" + fmtKm(v.km) + " km · " + esc(v.engineCode) + "</span></span>" +
       icon("down") + "</button>" +
 
@@ -746,6 +913,16 @@
         '<button class="filter-chip ' + (ui.maintenanceFilter === f ? "is-active" : "") + '" data-action="maintenance-filter" data-filter="' + f + '">' + f + "</button>"
       ).join("") + "</div>" +
       '<div class="card card--pad">' + logTimelineHTML(filtered) + "</div></section>" +
+
+      (reports.length ? '<section class="section"><div class="section-head"><span class="section-title">Diagnósticos guardados</span><span class="mono-label">' + reports.length + (reports.length === 1 ? " informe" : " informes") + "</span></div>" +
+        '<div class="card card--pad">' + reports.map((d) => {
+          const r = d.result || {};
+          const top = (r.hallazgos && r.hallazgos[0]) || {};
+          const u = aiUrgency(r.urgencia);
+          return '<div class="log-item"><div class="log-top"><div><div class="log-title">' + esc(top.sospecha || "Diagnóstico") + "</div>" +
+            '<div class="log-date">' + fmtDate(d.date) + " · " + (d.mode === "image" ? "Imagen" : "Audio") + '</div></div><span class="chip ' + u.chip + '">' + u.label + "</span></div>" +
+            '<div class="log-parts">' + esc(r.resumen || "") + "</div></div>";
+        }).join("") + "</div></section>" : "") +
 
       '<div class="affiliate-note">' + icon("shield") + "<span>Cada registro queda vinculado al kilometraje y al componente. En Pro se sella con hash de verificación y QR de compraventa.</span></div>";
   }
@@ -845,134 +1022,196 @@
      ------------------------------------------------------------------------ */
   function contextBanner(v) {
     if (!ui.params.fault) return "";
-    const f = (DB.faults[v.engineCode] || []).find((x) => x.id === ui.params.fault);
+    const f = faultsFor(v).find((x) => x.id === ui.params.fault);
     if (!f) return "";
     return '<div class="card card--pad" style="margin-bottom:9px;border-color:rgba(255,90,31,.25)"><div class="row-between">' +
       '<div><span class="mono-label">Diagnóstico dirigido</span><b class="h3" style="display:block;margin-top:4px">' + esc(f.title) + "</b>" +
       '<p class="tiny faint" style="margin-top:3px">' + esc(trunc(f.symptom, 76)) + "</p></div>" +
-      '<span class="chip chip--accent">' + esc(f.band) + "</span></div></div>";
+      '<span class="chip chip--accent">' + esc(f.years ? f.years[0] + "–" + f.years[1] : "Documentado") + "</span></div></div>";
   }
 
+  const VISUAL_PARTS = [
+    ["tyre", "Neumático"],
+    ["disc", "Frenos"],
+    ["engine", "Motor"],
+    ["leak", "Fugas"],
+    ["suspension", "Suspensión"],
+    ["other", "Otra pieza"]
+  ];
+
   function visualCameraHTML() {
-    const parts = [["disc", "Disco delantero"], ["pads", "Pastillas"]];
     const scanning = ui.visualStage === "scanning";
-    const result = ui.visualStage === "result" ? DB.visualResults[ui.visualPart] : null;
-    const metrics = ui.visualMetrics;
-    const captured = (ui.visualStage === "result" || scanning) && ui.capturedFrame;
+    const result = ui.visualStage === "result" ? ui.aiResult : null;
+    const captured = (ui.visualStage === "result" || scanning || ui.visualStage === "error") && ui.capturedFrame;
     const source = captured ?
       '<img src="' + ui.capturedFrame + '" alt="Captura de la cámara">' :
       ui.cameraLive ? '<video id="cameraFeed" autoplay playsinline muted></video>' :
-        '<img src="assets/brake-disc.png" alt="Referencia de demostración">';
-    const liveLabel = scanning ? "Procesando" : ui.cameraLive ? "Cámara en vivo" : captured ? "Captura guardada" : ui.cameraStarting ? "Abriendo cámara" : "Referencia demo";
+        '<img src="assets/brake-disc.png" alt="Referencia de la cámara">';
+    const liveLabel = scanning ? "Analizando la captura" : ui.cameraLive ? "Cámara en vivo" : captured ? "Captura guardada" : ui.cameraStarting ? "Abriendo cámara" : "Cámara apagada";
     const showActivate = !ui.cameraLive && !captured && !scanning;
-    const hint = scanning ? "Comparando la captura con patrones de desgaste…" :
-      ui.cameraLive ? "Encuadra la pieza y pulsa el disparador. La foto y las métricas son reales." :
+    const hint = scanning ? "Analizando la foto y leyendo la evidencia visible…" :
+      ui.cameraLive ? "Encuadra la pieza y pulsa el disparador. La foto se analiza al capturarla." :
         captured ? "Foto capturada en el dispositivo." :
-          "Activa la cámara para fotografiar la pieza. Sin permiso se usa una referencia demo.";
-    const resultHTML = result ? (metrics ?
-      '<div class="card card--pad visual-result">' +
-      '<div class="visual-status-row"><div><span class="mono-label">Resultado visual</span><h3>' + esc(result.title) + "</h3></div>" +
-      '<span class="tag ' + (metrics.score >= 55 ? "tag--ok" : "tag--warn") + '">' + (metrics.score >= 55 ? "Captura válida" : "Captura mejorable") + "</span></div>" +
-      '<div class="metric-grid"><div class="metric"><span>Resolución</span><b>' + metrics.width + " × " + metrics.height + '</b></div>' +
-      '<div class="metric"><span>Luminancia media</span><b>' + Math.round(metrics.luminance) + ' / 255</b></div>' +
-      '<div class="metric"><span>Nitidez</span><b>' + metrics.sharpness.toFixed(1).replace(".", ",") + '</b></div>' +
-      '<div class="metric"><span>Calidad de captura</span><b>' + metrics.score + ' / 100</b></div></div>' +
-      '<div class="demo-wear"><div class="row-between"><span class="mono-label">Desgaste estimado</span><span class="chip">Demo</span></div>' +
-      '<b>' + esc(result.headline) + "</b><p>" + esc(result.note) + "</p>" +
-      '<div class="metric-grid" style="margin-top:7px">' + result.metrics.slice(0, 2).map(([k, val]) => '<div class="metric"><span>' + esc(k) + "</span><b>" + esc(val) + "</b></div>").join("") + "</div></div>" +
-      '<p class="visual-note">La foto y la calidad de captura son reales. La estimación de desgaste sigue siendo una referencia de demostración: no hay medición milimétrica sin calibración.</p>' +
-      '<div class="row-between" style="margin-top:10px"><span class="mono-label">Calidad ' + metrics.score + "%</span>" +
-      '<button class="btn btn--sm" data-action="visual-save">' + icon("plus") + " Registrar inspección</button></div></div>" :
-      '<div class="card card--pad visual-result">' +
-      '<div class="visual-status-row"><div><span class="mono-label">Resultado visual · demo</span><h3>' + esc(result.title) + "</h3></div>" +
-      '<span class="tag ' + (result.status === "warning" ? "tag--warn" : "tag--ok") + '">' + esc(result.statusLabel) + "</span></div>" +
-      '<div class="visual-headline">' + esc(result.headline) + "</div>" +
-      '<div class="metric-grid">' + result.metrics.map(([k, val]) => '<div class="metric"><span>' + esc(k) + "</span><b>" + esc(val) + "</b></div>").join("") + "</div>" +
-      '<p class="visual-note">' + esc(result.note) + "</p>" +
-      '<div class="row-between" style="margin-top:10px"><span class="mono-label">Confianza demo ' + result.confidence + "%</span>" +
-      '<button class="btn btn--sm" data-action="visual-save">' + icon("plus") + " Registrar inspección</button></div></div>") : "";
-    return '<div class="chip-row" style="margin-bottom:8px">' + parts.map(([id, label]) =>
-      '<button class="chip chip--button ' + (ui.visualPart === id ? "chip--accent" : "") + '" data-action="visual-part" data-part="' + id + '">' + label + "</button>"
+          "Activa la cámara o sube una foto. Sin cámara no hay diagnóstico visual.";
+    const partLabel = (VISUAL_PARTS.find((p) => p[0] === ui.visualPart) || VISUAL_PARTS[0])[1];
+    const errorHTML = ui.visualStage === "error" && ui.aiError
+      ? '<div class="ai-error">' + icon("alert") + "<span>" + esc(ui.aiError) + '</span></div><button class="btn btn--ghost btn--block" style="margin-top:8px" data-action="visual-reset">' + icon("retry") + " Probar otra foto</button>"
+      : "";
+    return '<div class="chip-row" style="margin-bottom:8px">' + VISUAL_PARTS.map(([id, label]) =>
+      '<button class="chip chip--button ' + (ui.visualPart === id ? "chip--accent" : "") + '" data-action="visual-part" data-part="' + id + '">' + esc(label) + "</button>"
     ).join("") + "</div>" +
       '<div class="camera-card ' + (scanning ? "camera-scanning" : "") + '">' + source +
-      '<div class="camera-topline"><span class="camera-live"><span class="status-dot"></span>' + liveLabel + '</span><span class="tag tag--glass">MACRO · 1×</span></div>' +
+      '<div class="camera-topline"><span class="camera-live"><span class="status-dot"></span>' + liveLabel + '</span><span class="tag tag--glass">' + esc(partLabel) + '</span></div>' +
       '<div class="camera-corners"><span></span><span></span><span></span><span></span></div>' +
       '<div class="camera-reticle"></div><div class="scan-line"></div>' +
-      (showActivate ? '<div class="camera-activate"><button class="btn btn--sm btn--primary" data-action="camera-start" ' + (ui.cameraStarting ? "disabled" : "") + ">" + icon("camera") + (ui.cameraStarting ? " Abriendo…" : " Activar cámara real") + "</button>" +
+      (showActivate ? '<div class="camera-activate"><button class="btn btn--sm btn--primary" data-action="camera-start" ' + (ui.cameraStarting ? "disabled" : "") + ">" + icon("camera") + (ui.cameraStarting ? " Abriendo…" : " Activar cámara") + "</button>" +
         '<span class="camera-error">' + esc(ui.cameraError || "Requiere HTTPS o localhost") + "</span></div>" : "") +
-      (result && !metrics ? '<div class="detect-box"><span>' + (ui.visualPart === "disc" ? "DESGASTE 64%" : "DESGASTE 46%") + "</span></div>" : "") +
-      '<div class="camera-bottom"><span class="chip">' + (ui.visualPart === "disc" ? "Disco del. izq." : "Pastilla del. izq.") + "</span>" +
-      '<button class="capture-btn" data-action="visual-capture" aria-label="Capturar" ' + (scanning ? "disabled" : "") + ">" + icon(scanning ? "scan" : "camera") + "</button></div></div>" +
+      '<div class="camera-bottom"><span class="chip">' + esc(partLabel) + "</span>" +
+      '<button class="capture-btn" data-action="visual-capture" aria-label="Capturar" ' + (scanning || !ui.cameraLive ? "disabled" : "") + ">" + icon(scanning ? "scan" : "camera") + "</button></div></div>" +
+      '<input type="file" id="visualFileInput" accept="image/*" hidden>' +
+      '<div class="row" style="margin-top:8px;gap:7px"><button class="btn btn--ghost btn--sm" style="flex:1" data-action="visual-upload">' + icon("file") + " Subir una foto</button>" +
+      (captured ? '<button class="btn btn--ghost btn--sm" style="flex:1" data-action="visual-retake">' + icon("camera") + " Repetir</button>" : "") + "</div>" +
       '<div class="rec-hint" style="margin-top:8px">' + icon("info") + " " + hint + "</div>" +
-      resultHTML;
+      errorHTML +
+      (result ? aiResultHTML("image") : "");
   }
 
-  function diagAudioBars() {
-    let html = "";
-    for (let i = 0; i < 32; i++) {
-      const h = 4 + Math.abs(Math.sin(i * 0.7)) * 14 + (i % 3) * 2;
-      html += '<i class="' + (i < 20 ? "is-on" : "") + '" style="height:' + h.toFixed(0) + 'px"></i>';
+
+  const URGENCY = {
+    baja: { label: "Prioridad baja", chip: "chip--ok" },
+    media: { label: "Revisar pronto", chip: "chip--accent" },
+    alta: { label: "Revisar cuanto antes", chip: "chip--danger" },
+    inmediata: { label: "No circular", chip: "chip--danger" }
+  };
+
+  function aiUrgency(u) {
+    return URGENCY[u] || URGENCY.media;
+  }
+
+  function aiIllustrationHTML() {
+    if (ui.aiImageStatus === "loading") {
+      return '<div class="ai-illo ai-illo--loading"><span class="ai-illo-shimmer"></span><div><b>Preparando imagen</b><span>Se crea a partir del hallazgo principal.</span></div></div>';
     }
-    return html;
-  }
-
-  function guideStepsHTML(steps, unlocked) {
-    const one = '<div class="guide-step"><span class="guide-num">01</span><p>' + esc(steps[0]) + "</p></div>";
-    if (unlocked) {
-      return one + steps.slice(1).map((s, i) =>
-        '<div class="guide-step"><span class="guide-num">' + pad2(i + 2) + "</span><p>" + esc(s) + "</p></div>"
-      ).join("");
+    if (ui.aiImage && ui.aiImage.url) {
+      const label = ui.aiImage.source === "ai" ? "Ilustración orientativa · no es una foto de tu vehículo" : "Imagen de referencia obtenida de Wikipedia";
+      return '<figure class="ai-illo"><img src="' + esc(ui.aiImage.url) + '" alt="Ilustración del componente sospechoso" loading="lazy" referrerpolicy="no-referrer">' +
+        '<figcaption>' + icon("info") + "<span>" + label + "</span></figcaption></figure>";
     }
-    const rest = '<div class="guide-steps">' + steps.slice(1).map((s, i) =>
-      '<div class="guide-step"><span class="guide-num">' + pad2(i + 2) + "</span><p>" + esc(s) + "</p></div>"
-    ).join("") + "</div>";
-    return one + '<div class="locked-guide"><div class="locked-content">' + rest + "</div>" +
-      '<div class="lock-overlay">' + icon("lock") + "<b>Informe completo bloqueado</b><p>Desbloquea los " + (steps.length - 1) + " pasos restantes y guarda el análisis en tu libro.</p>" +
-      '<button class="btn btn--sm btn--primary" data-action="diag-unlock">' + icon("pro") + " Desbloquear informe</button></div></div>";
+    if (ui.aiImageStatus === "none") {
+      return '<div class="ai-illo ai-illo--empty">' + icon("info") + "<span>No se pudo obtener una ilustración para este hallazgo. El diagnóstico sigue siendo válido.</span></div>";
+    }
+    return "";
   }
 
-  function diagResultHTML(v) {
-    const results = diagnosticResults();
-    const top = results[0];
-    const others = results.slice(1);
-    const unlocked = state.pro || ui.diagUnlocked;
-    const summary = ui.audioSummary;
-    const real = !!(summary && summary.real);
-    const duration = real ? summary.duration.toFixed(1).replace(".", ",") + " s" : "8,0 s";
-    const readings = real ?
-      '<div class="card card--pad section" style="margin-top:10px"><div class="row-between" style="margin-bottom:7px"><span class="mono-label">Lectura del micrófono</span><span class="chip chip--ok">' + icon("check") + " Real</span></div>" +
-      '<div class="metric-grid" style="margin-top:0"><div class="metric"><span>Frecuencia dominante</span><b>' + fmtHz(summary.freq) + '</b></div>' +
-      '<div class="metric"><span>Pico</span><b>' + fmtDb(summary.peakDb) + '</b></div>' +
-      '<div class="metric"><span>Duración</span><b>' + duration + '</b></div>' +
-      '<div class="metric"><span>Muestreo</span><b>' + (summary.sampleRate ? (summary.sampleRate / 1000).toFixed(1).replace(".", ",") + " kHz" : "—") + '</b></div></div>' +
-      '<p class="visual-note">La frecuencia y el nivel son medidas reales del micrófono (dBFS, sin calibrar a dB SPL). La clasificación aplica reglas por bandas, no un modelo entrenado: úsala como orientación.</p></div>' : "";
-    return '<div class="result-head"><div><div class="eyebrow">Análisis completado · ' + duration + '</div><h2>Resultado</h2><p>' + (real ? "Firma medida en el dispositivo · " + (summary.ambient ? "cancelación ambiental ON" : "sin cancelación") : "Firma acústica filtrada · 48 kHz · mono") + '</p></div>' +
-      '<span class="chip ' + (unlocked ? "chip--ok" : "chip--accent") + '">' + (unlocked ? "Informe completo" : "Vista previa") + "</span></div>" +
-      '<div class="match-card"><div class="match-top"><div><div class="match-label">Coincidencia principal</div><div class="match-title">' + esc(top.label) + "</div></div>" +
-      '<div class="match-pct"><b>' + top.pct + "%</b><span>" + (real ? "AFINIDAD" : "MATCH") + "</span></div></div>" +
-      '<p class="match-desc">' + esc(top.desc) + "</p>" +
-      '<div class="audio-bar"><button class="audio-play" data-action="diag-play" aria-label="Reproducir">' + icon("play", "ico--fill") + "</button>" +
-      '<div class="audio-wave">' + diagAudioBars() + '</div><span class="audio-time">' + duration + "</span></div>" +
-      '<div class="match-meta"><div class="chip-row">' + (real ? '<span class="chip chip--accent">Medido ' + fmtHz(summary.freq) + '</span><span class="chip">Banda ' + esc(top.band) + '</span>' : '<span class="chip">' + esc(top.band) + '</span><span class="chip">Micrófono superior</span>') + "</div>" +
-      '<span class="chip">' + esc(top.id === "chain" && v.engineCode === "CJXC" ? "Riesgo alto" : "Prioridad media") + "</span></div></div>" +
+  function paintIllustration() {
+    const el = document.getElementById("aiIllustration");
+    if (el) el.innerHTML = aiIllustrationHTML();
+  }
 
-      readings +
+  function startIllustration(mode) {
+    const result = ui.aiResult;
+    if (!result || !result.hallazgos.length) return;
+    const top = result.hallazgos[0];
+    ui.aiImage = null;
+    ui.aiImageStatus = "loading";
+    paintIllustration();
+    PitBoxAI.illustrate({
+      mode: mode,
+      component: top.componente,
+      suspicion: top.sospecha,
+      part: ui.visualPart
+    }).then((image) => {
+      if (ui.aiResult !== result) return;
+      ui.aiImage = image;
+      ui.aiImageStatus = image ? "ready" : "none";
+      paintIllustration();
+    }).catch(() => {
+      if (ui.aiResult !== result) return;
+      ui.aiImageStatus = "none";
+      paintIllustration();
+    });
+  }
 
-      '<section class="section"><div class="section-head"><span class="section-title">Otras hipótesis</span><span class="mono-label">' + (real ? "Orden orientativo" : "Ordenadas") + '</span></div>' +
-      '<div class="candidates">' + others.map((r) =>
-        '<div class="candidate"><div class="candidate-main"><b>' + esc(r.label) + '</b><div class="cand-track"><i style="width:' + r.pct + '%"></i></div></div><span class="candidate-pct">' + r.pct + "%</span></div>"
-      ).join("") + "</div></section>" +
+  function aiReadingsHTML(mode) {
+    if (mode === "audio") {
+      const s = ui.audioSummary;
+      if (!s || !s.real) return "";
+      const duration = s.duration ? s.duration.toFixed(1).replace(".", ",") + " s" : "—";
+      return '<div class="card card--pad section"><div class="row-between" style="margin-bottom:7px"><span class="mono-label">Lectura del micrófono</span><span class="chip chip--ok">' + icon("check") + " Real</span></div>" +
+        '<div class="metric-grid" style="margin-top:0">' +
+        (s.freq ? '<div class="metric"><span>Frecuencia dominante</span><b>' + fmtHz(s.freq) + "</b></div>" : "") +
+        (Number.isFinite(s.peakDb) ? '<div class="metric"><span>Pico</span><b>' + fmtDb(s.peakDb) + "</b></div>" : "") +
+        '<div class="metric"><span>Duración</span><b>' + duration + "</b></div>" +
+        '<div class="metric"><span>Origen</span><b>' + (s.uploaded ? "Archivo" : "Micrófono") + "</b></div></div>" +
+        '<div class="row-between" style="margin-top:9px"><button class="btn btn--ghost btn--sm" data-action="diag-play" ' + (ui.audioURL ? "" : "disabled") + ">" + icon("play") + " Escuchar captura</button>" +
+        '<span class="mono-label">' + esc(s.uploaded ? (ui.audioUploadName || "Archivo") : "Grabación de 8 s") + "</span></div>" +
+        '<p class="visual-note">Nivel en dBFS sin calibrar a dB SPL. La interpretación se hace a partir del audio, no con una regla fija.</p></div>';
+    }
+    const m = ui.visualMetrics;
+    if (!m) return "";
+    return '<div class="card card--pad section"><div class="row-between" style="margin-bottom:7px"><span class="mono-label">Calidad de la captura</span><span class="tag ' + (m.score >= 55 ? "tag--ok" : "tag--warn") + '">' + (m.score >= 55 ? "Válida" : "Mejorable") + "</span></div>" +
+      '<div class="metric-grid" style="margin-top:0"><div class="metric"><span>Resolución</span><b>' + m.width + " × " + m.height + "</b></div>" +
+      '<div class="metric"><span>Luminancia</span><b>' + Math.round(m.luminance) + " / 255</b></div>" +
+      '<div class="metric"><span>Nitidez</span><b>' + m.sharpness.toFixed(1).replace(".", ",") + "</b></div>" +
+      '<div class="metric"><span>Calidad</span><b>' + m.score + " / 100</b></div></div>" +
+      '<p class="visual-note">La foto y estas métricas se miden en el dispositivo. El diagnóstico se calcula sobre la imagen.</p></div>';
+  }
 
-      '<section class="section"><div class="card guide-card" style="padding:0;overflow:hidden">' +
-      '<div class="guide-head" style="padding:14px 14px 0"><b>Guía de comprobación</b><span class="chip">' + top.steps.length + " pasos</span></div>" +
-      '<div style="padding:0 14px 12px"><div class="guide-steps">' + guideStepsHTML(top.steps, unlocked) + "</div></div></div>" +
-      (state.pro ? "" : '<div class="pass-strip" style="margin-top:7px">' + icon("pro") + '<div class="pass-main"><b>Pase diagnóstico</b><span>' + state.diagCredits + " disponible" + (state.diagCredits === 1 ? "" : "s") + " · informe completo</span></div>" +
-        '<button class="btn btn--sm" data-action="buy-pass">3,99 €</button></div>') + "</section>" +
+  function aiResultHTML(mode) {
+    const r = ui.aiResult;
+    if (!r) return "";
+    const u = aiUrgency(r.urgencia);
+    const showQuestions = ui.aiRound < 1 && r.preguntas.length;
+    const safety = r.urgencia === "alta" || r.urgencia === "inmediata"
+      ? '<div class="ai-safety">' + icon("alert") + "<div><b>Seguridad primero</b><span>" +
+        (r.urgencia === "inmediata" ? "No circules con el coche hasta que lo revise un profesional." : "Evita trayectos largos y revisa el coche cuanto antes.") + "</span></div></div>"
+      : "";
+    return '<div class="result-head"><div><div class="eyebrow">' + icon("bolt") + " Diagnóstico · " + (mode === "audio" ? "audio" : "imagen") + '</div><h2>Resultado</h2><p>Basado en la captura y en los datos de tu ' + esc(currentVehicle().name) + ".</p></div>" +
+      '<span class="chip ' + u.chip + '">' + u.label + "</span></div>" +
+
+      safety +
+
+      (ui.aiError ? '<div class="ai-error">' + icon("alert") + "<span>" + esc(ui.aiError) + "</span></div>" : "") +
+
+      '<div class="ai-summary card card--pad"><div class="row-between" style="margin-bottom:8px"><span class="mono-label">Lectura del análisis</span><span class="chip">' + r.confianza + "% confianza</span></div>" +
+      "<p>" + esc(r.resumen) + "</p>" +
+      (r.no_concluyente ? '<p class="ai-limit">' + icon("info") + "<span>" + esc(r.no_concluyente) + "</span></p>" : "") + "</div>" +
+
+      '<section class="section"><div class="section-head"><span class="section-title">Posibilidades</span><span class="mono-label">' + r.hallazgos.length + " hipótesis</span></div>" +
+      '<div class="ai-findings">' + r.hallazgos.map((h, i) => {
+        const g = h.gravedad === "grave" ? "chip--danger" : h.gravedad === "moderada" ? "chip--accent" : "chip--ok";
+        return '<article class="ai-finding"><div class="ai-finding-head"><div><span class="mono-label">' + (i === 0 ? "Más probable" : "Alternativa") + "</span><b>" + esc(h.sospecha) + "</b><span class=\"ai-part\">" + esc(h.componente) + "</span></div>" +
+          '<span class="ai-prob">' + h.probabilidad + "%</span></div>" +
+          '<div class="cand-track"><i style="width:' + h.probabilidad + '%"></i></div>' +
+          '<p class="ai-evidence">' + esc(h.evidencia) + "</p>" +
+          '<div class="row-between"><span class="chip ' + g + '">' + esc(h.gravedad) + '</span><span class="ai-action">' + esc(h.accion) + "</span></div></article>";
+      }).join("") + "</div></section>" +
+
+      (r.comprobaciones.length ? '<section class="section"><div class="section-head"><span class="section-title">Qué comprobar</span><span class="mono-label">Sin desmontar</span></div>' +
+        '<div class="ai-checks">' + r.comprobaciones.map((c, i) => '<div class="ai-check"><span>' + pad2(i + 1) + "</span><p>" + esc(c) + "</p></div>").join("") + "</div></section>" : "") +
+
+      (showQuestions ? '<section class="section"><div class="section-head"><span class="section-title">Ayúdame a afinar</span><span class="mono-label">Opcional</span></div>' +
+        '<div class="ai-questions">' + r.preguntas.map((q, qi) =>
+          '<div class="ai-question"><b>' + esc(q.pregunta) + '</b><div class="chip-row">' + q.opciones.map((o) =>
+            '<button class="chip chip--button ' + (ui.aiAnswers[qi] === o ? "chip--accent" : "") + '" data-action="ai-answer" data-q="' + qi + '" data-value="' + esc(o) + '">' + esc(o) + "</button>"
+          ).join("") + "</div></div>"
+        ).join("") +
+        '<div class="field" style="margin-top:10px"><label>¿Algo más? <small>opcional</small></label><textarea data-ai-followup placeholder="Ej.: solo suena al girar a la izquierda y el volante se nota duro">' + esc(ui.aiFollowup) + "</textarea></div>" +
+        '<button class="btn btn--primary btn--block" style="margin-top:8px" data-action="ai-followup" ' + (ui.aiFollowupBusy ? "disabled" : "") + ">" +
+        icon("bolt") + (ui.aiFollowupBusy ? " Afinando diagnóstico…" : " Afinar diagnóstico") + "</button></div></section>" : "") +
+
+      (ui.aiRound > 0 ? '<div class="ai-refined">' + icon("check") + " Diagnóstico afinado con tus respuestas.</div>" : "") +
+
+      aiReadingsHTML(mode) +
+
+      '<section class="section" id="aiIllustration">' + aiIllustrationHTML() + "</section>" +
+
+      '<div class="ai-cost-row">' + (r.coste ? '<span>' + icon("bag") + " " + esc(r.coste) + "</span>" : "") + "</div>" +
 
       '<div class="row" style="margin-top:12px;gap:7px">' +
-      '<button class="btn btn--ghost" style="flex:1" data-action="diag-reset">' + icon("retry") + " Nuevo</button>" +
-      '<button class="btn btn--primary" style="flex:1.4" data-action="diag-save">' + icon("check") + " Guardar informe</button></div>" +
-      '<div class="disclaimer">' + icon("alert") + "<span>Diagnóstico orientativo basado en patrones de sonido. Confirma en taller antes de sustituir piezas.</span></div>";
+      '<button class="btn btn--ghost" style="flex:1" data-action="' + (mode === "audio" ? "diag-reset" : "visual-reset") + '">' + icon("retry") + " Nuevo</button>" +
+      '<button class="btn btn--primary" style="flex:1.4" data-action="' + (mode === "audio" ? "diag-save" : "visual-save") + '">' + icon("check") + " Guardar informe</button></div>" +
+      '<div class="disclaimer">' + icon("alert") + "<span>" + esc(r.aviso) + " Esta app no sustituye a un mecánico: sirve para identificar una posibilidad y confirmarla en el taller.</span></div>";
   }
 
   function renderDiag(v) {
@@ -980,43 +1219,47 @@
     let body = "";
     if (ui.diagMode === "visual") {
       body = visualCameraHTML() +
-        '<div class="disclaimer">' + icon("info") + "<span>La cámara captura una foto real y mide resolución, luz y nitidez. La estimación de desgaste es una referencia demo, no una medición calibrada.</span></div>" +
-        (ui.visualStage === "result" ? '<button class="btn btn--ghost btn--block" style="margin-top:10px" data-action="visual-reset">' + icon("retry") + " Repetir captura</button>" : "");
+        '<div class="disclaimer">' + icon("shield") + "<span>La foto se procesa solo al analizar. La app no la guarda en ningún servidor propio. El resultado es orientativo y no sustituye a un mecánico.</span></div>";
     } else if (ui.diagStage === "recording") {
-      const real = ui.micMode === "real";
-      body = '<div class="recording-stage"><div class="rec-top"><span class="rec-live"><span class="status-dot"></span> ' + (real ? "Grabando · micrófono real" : "Grabando · demo") + "</span>" +
+      body = '<div class="recording-stage"><div class="rec-top"><span class="rec-live"><span class="status-dot"></span> Grabando · micrófono real</span>' +
         '<span class="rec-timer"><span id="recTimer">00:00.0</span> <small>/ 00:08</small></span></div>' +
         '<div class="wave-panel"><canvas id="waveCanvas"></canvas><div class="wave-axis"></div><span class="wave-freq" id="waveFreq">—</span></div>' +
-        '<div class="rec-stats"><div class="rec-stat"><span>' + (real ? "Pico" : "Pico demo") + '</span><b data-rec-peak>' + (real ? "silencio" : "68 dB") + '</b></div><div class="rec-stat"><span>Frecuencia</span><b data-rec-freq>—</b></div><div class="rec-stat"><span>Filtro</span><b>' + (ui.ambientFilter ? "ON" : "OFF") + '</b></div></div>' +
-        '<div class="rec-hint">' + icon("info") + (real ? " Acerca el móvil al foco y evita golpear la carrocería. Se analiza la frecuencia dominante." : " Micrófono no disponible: esta captura se simula para que puedas probar el flujo.") + "</div>" +
+        '<div class="rec-stats"><div class="rec-stat"><span>Pico</span><b data-rec-peak>silencio</b></div><div class="rec-stat"><span>Frecuencia</span><b data-rec-freq>—</b></div><div class="rec-stat"><span>Filtro</span><b>' + (ui.ambientFilter ? "ON" : "OFF") + '</b></div></div>' +
+        '<div class="rec-hint">' + icon("info") + " Acerca el móvil al ruido y evita golpear la carrocería. Al detener, el audio se procesa para el diagnóstico." + "</div>" +
         '<div class="rec-controls"><button class="stop-btn" data-action="diag-stop">' + icon("stop") + " Detener y analizar</button></div></div>";
     } else if (ui.diagStage === "analyzing") {
-      body = '<div class="analyzing"><div class="scan-ring">' + icon("wave") + "</div>" +
-        "<h3>Analizando la firma</h3><p>Comparando con 12.480 patrones de avería</p>" +
-        '<div class="scan-steps"><div class="scan-step is-done"><span class="mini-dot"></span>Ruido ambiental filtrado</div>' +
-        '<div class="scan-step is-done"><span class="mini-dot"></span>Espectro 0,2 – 8 kHz extraído</div>' +
-        '<div class="scan-step is-active"><span class="mini-dot"></span>Coincidencia con patrones ' + esc(v.engineCode) + '…</div>' +
-        '<div class="scan-step"><span class="mini-dot"></span>Generando guía de comprobación</div></div></div>';
+      body = '<div class="analyzing"><div class="scan-ring">' + icon("bolt") + "</div>" +
+        "<h3>Analizando la captura</h3><p>Interpretando el audio y los datos de tu coche</p>" +
+        '<div class="scan-steps"><div class="scan-step is-done"><span class="mini-dot"></span>Audio capturado y normalizado</div>' +
+        '<div class="scan-step is-done"><span class="mini-dot"></span>Contexto del vehículo añadido</div>' +
+        '<div class="scan-step is-active"><span class="mini-dot"></span>Interpretando la evidencia acústica…</div>' +
+        '<div class="scan-step"><span class="mini-dot"></span>Redactando comprobaciones seguras</div></div></div>';
     } else if (ui.diagStage === "result") {
-      body = diagResultHTML(v);
+      body = aiResultHTML("audio");
+    } else if (ui.diagStage === "error") {
+      body = '<div class="ai-error-card">' + icon("alert") + "<h3>No se pudo completar el análisis</h3><p>" + esc(ui.aiError || "Error desconocido.") + "</p>" +
+        '<div class="row" style="gap:7px;margin-top:12px"><button class="btn btn--ghost" style="flex:1" data-action="diag-reset">' + icon("retry") + " Volver</button>" +
+        (ui.audioWav ? '<button class="btn btn--primary" style="flex:1.2" data-action="diag-retry">' + icon("bolt") + " Reintentar</button>" : "") + "</div></div>";
     } else {
       body = contextBanner(v) +
-        '<div class="diag-hero"><span class="diag-kicker">' + icon("scan") + " Análisis en local</span>" +
-        "<h2>Escucha<br>lo que falla.</h2><p>Graba 8 segundos del motor o rodaje. PitBox filtra el ambiente y compara la firma con fallos conocidos de tu motor.</p>" +
+        '<div class="diag-hero"><span class="diag-kicker">' + icon("bolt") + " Diagnóstico acústico</span>" +
+        "<h2>Graba el ruido.<br>Escucha qué falla.</h2><p>Ocho segundos de motor, rodaje o giro de volante. La app cruza el sonido con el motor de tu coche y te dice qué puede ser y qué comprobar.</p>" +
         '<div class="diag-orbit"><span class="orbit-ring"></span><span class="orbit-ring orbit-ring--2"></span><span class="orbit-ring orbit-ring--3"></span>' +
         '<span class="orbit-tick orbit-tick--1"></span><span class="orbit-tick orbit-tick--2"></span><span class="orbit-tick orbit-tick--3"></span>' +
         '<button class="record-btn" data-action="diag-start" aria-label="Grabar ruido">' + icon("mic") + "</button></div>" +
-        '<div class="record-label">Grabar 8 segundos</div>' +
-        '<div class="diag-noise"><span class="noise-bars"><span></span><span></span><span></span><span></span><span></span></span> Ruido ambiente 34 dB · listo</div></div>' +
+        '<div class="record-label">Grabar 8 segundos</div></div>' +
+        '<div class="field" style="margin-top:12px"><label>¿Qué notas? <small>opcional, ayuda mucho</small></label><textarea data-ai-symptom placeholder="Ej.: chirrido al girar el volante en parado">' + esc(ui.aiSymptom) + "</textarea></div>" +
+        '<input type="file" id="audioFileInput" accept="audio/*" hidden>' +
+        '<button class="btn btn--ghost btn--block" style="margin-top:8px" data-action="audio-upload">' + icon("file") + " Subir un audio grabado</button>" +
         '<div class="diag-tips"><div class="diag-tip">' + icon("mic") + "<b>1,5 m</b><span>del foco del ruido</span></div>" +
         '<div class="diag-tip">' + icon("engine") + "<b>Ralentí</b><span>o rodaje constante</span></div>" +
         '<div class="diag-tip">' + icon("wind") + "<b>Sin viento</b><span>ni eco de pared</span></div></div>" +
         '<div class="card card--pad section"><div class="row-between" style="margin-bottom:4px"><span class="mono-label">Ajustes de captura</span><span class="chip">Local</span></div>' +
-        '<div class="switch-row"><div><b>Cancelación ambiental</b><span>Beamforming de doble micrófono</span></div>' +
+        '<div class="switch-row"><div><b>Cancelación ambiental</b><span>Reduce ruido constante del entorno</span></div>' +
         '<button class="switch ' + (ui.ambientFilter ? "is-on" : "") + '" data-action="toggle-filter" data-key="ambient" aria-label="Cancelación ambiental"></button></div>' +
         '<div class="switch-row"><div><b>Filtro de banda</b><span>0,2 – 8 kHz · motor y rodamientos</span></div>' +
         '<button class="switch ' + (ui.bandFilter ? "is-on" : "") + '" data-action="toggle-filter" data-key="band" aria-label="Filtro de banda"></button></div></div>' +
-        '<div class="disclaimer">' + icon("info") + "<span>Prototipo: la captura y el análisis están simulados. La versión real usaría el micrófono y DSP en el dispositivo.</span></div>";
+        '<div class="disclaimer">' + icon("shield") + "<span>El audio se procesa solo al analizar. No se envía tu nombre, matrícula ni VIN. El resultado es orientativo: identifica una posibilidad y confírmala con un mecánico.</span></div>";
     }
 
     return '<div class="screen-head"><div class="head-main"><div class="eyebrow">Acústico + visión</div><h1 class="screen-title">Diagnóstico</h1></div>' +
@@ -1097,7 +1340,7 @@
       '<div class="head-main"><div class="eyebrow">Libro de mantenimiento</div><h1 class="screen-title">Registrar servicio</h1></div></div>' +
 
       '<button class="vehicle-pill" data-action="vehicle-switcher">' +
-      '<span class="vehicle-thumb"><img src="' + v.image + '" alt=""></span>' +
+      '<span class="vehicle-thumb"><img class="vehicle-photo" src="' + esc(vehicleImageSrc(v)) + '"' + vehiclePhotoAttrs(v) + ' alt=""></span>' +
       '<span class="vehicle-pill-main"><b>' + esc(v.name) + '</b><span>' + fmtKm(v.km) + " km actuales · " + esc(v.engineCode) + "</span></span>" + icon("down") + "</button>" +
 
       (fromPart ? '<div class="fit-box" style="margin:0 0 9px">' + icon("bag") + "<div><b>Desde recambio OEM</b><span>" + esc(fromPart) + " · añade el trabajo y la fecha</span></div></div>" : "") +
@@ -1163,6 +1406,345 @@
     return template ? template.components : [];
   }
 
+  /* ------------------------------------------------------------------------
+     Selector de vehículo tipo Autodoc: marca → versión → motorización
+     ------------------------------------------------------------------------ */
+  function catalogBrandEntry() {
+    return DB.vehicleCatalog.find((b) => b.brand === ui.catalogBrand) || null;
+  }
+
+  function catalogUsesManual() {
+    return ui.catalogManual;
+  }
+
+  function catalogModelRows() {
+    const entry = catalogBrandEntry();
+    if (!entry) return [];
+    const rows = [];
+    entry.models.forEach((model) => {
+      const gens = DB.generations[ui.catalogBrand + "|" + model] || [];
+      if (gens.length) {
+        gens.forEach((gen, index) => rows.push({ model, gen, index }));
+      } else {
+        rows.push({ model, gen: null, index: -1, variants: DB.engineVariants[ui.catalogBrand + "|" + model] || [] });
+      }
+    });
+    return rows;
+  }
+
+  function catalogGeneration() {
+    if (!ui.catalogBrand || !ui.catalogModel || ui.catalogGen < 0) return null;
+    const gens = DB.generations[ui.catalogBrand + "|" + ui.catalogModel] || [];
+    return gens[ui.catalogGen] || null;
+  }
+
+  function catalogEngineList() {
+    if (!ui.catalogBrand || !ui.catalogModel) return [];
+    const all = DB.engineVariants[ui.catalogBrand + "|" + ui.catalogModel] || [];
+    const gen = catalogGeneration();
+    if (!gen) return all;
+    const tagged = all.filter((e) => e.g === gen.code);
+    if (tagged.length) return tagged;
+    const byYears = all.filter((e) => Number(e.to) >= gen.from && Number(e.from) <= gen.to);
+    return byYears.length ? byYears : all;
+  }
+
+  function catalogEngine() {
+    if (ui.catalogEng < 0) return null;
+    return catalogEngineList()[ui.catalogEng] || null;
+  }
+
+  function engineKw(e) {
+    if (!e) return 0;
+    if (e.kw) return e.kw;
+    return Math.round((Number(e.power) || 0) * 0.7355);
+  }
+
+  function enginePowerText(e) {
+    if (!e) return "";
+    const cv = Number(e.power) || 0;
+    const kw = engineKw(e);
+    return kw && cv ? kw + " kW / " + cv + " CV" : (cv ? cv + " CV" : "—");
+  }
+
+  function dateRangeText(from, fromM, to, toM) {
+    if (!from) return "—";
+    const left = (fromM ? pad2(fromM) + "." : "") + from;
+    const right = !to || to >= 2026 ? "…" : (toM ? pad2(toM) + "." : "") + to;
+    return left + " – " + right;
+  }
+
+  function generationRange(gen) {
+    return gen ? dateRangeText(gen.from, gen.fromM, gen.to, gen.toM) : "";
+  }
+
+  function engineRange(e) {
+    return e ? dateRangeText(e.from, e.fromM, e.to, e.toM) : "";
+  }
+
+  function engineFullLabel(e) {
+    if (!e) return "";
+    return /\d+\s*CV/i.test(e.label) ? e.label : e.label + " · " + enginePowerText(e);
+  }
+
+  function engineTitle(e) {
+    return engineFullLabel(e);
+  }
+
+  function fuelLabel(key) {
+    return (DB.fuelProfiles[key] || DB.fuelProfiles.gasolina).label;
+  }
+
+  function catalogFuelKey() {
+    const eng = catalogEngine();
+    return eng && DB.fuelProfiles[eng.fuel] ? eng.fuel : ui.catalogFuel;
+  }
+
+  function catalogFuelProfile() {
+    return DB.fuelProfiles[catalogFuelKey()] || DB.fuelProfiles.gasolina;
+  }
+
+  function catalogKnownProfile() {
+    const eng = catalogEngine();
+    const code = eng && eng.code
+      ? String(eng.code).toUpperCase()
+      : (catalogUsesManual() ? String(ui.catalogCode || "").trim().toUpperCase() : "");
+    if (!code) return null;
+    return DB.engineProfiles.find((p) => p.code === code) || null;
+  }
+
+  function catalogActiveProfile() {
+    return catalogKnownProfile() || catalogFuelProfile();
+  }
+
+  function catalogTotals() {
+    return DB.vehicleCatalog.reduce((acc, b) => ({ brands: acc.brands + 1, models: acc.models + b.models.length }), { brands: 0, models: 0 });
+  }
+
+  function catalogDisplayName() {
+    if (catalogUsesManual()) {
+      return [ui.catalogBrandCustom.trim(), ui.catalogModelCustom.trim()].filter(Boolean).join(" ");
+    }
+    return [ui.catalogBrand, ui.catalogModel].filter(Boolean).join(" ");
+  }
+
+  function modelRowMatches(row, q) {
+    if (!q) return true;
+    return normalize([
+      row.model,
+      row.gen ? row.gen.name : "",
+      row.gen ? row.gen.chassis : "",
+      row.gen ? row.gen.body : "",
+      row.gen ? generationRange(row.gen) : ""
+    ].join(" ")).includes(q);
+  }
+
+  function engineMatches(e, q) {
+    if (!q) return true;
+    return normalize([
+      e.label, e.code || "", fuelLabel(e.fuel), engineRange(e), e.cc || "", e.power || ""
+    ].join(" ")).includes(q);
+  }
+
+  function catalogBrandListHTML() {
+    const q = normalize(ui.catalogSearch.brand).trim();
+    const rows = DB.vehicleCatalog.filter((b) => !q || normalize(b.brand).includes(q));
+    if (!rows.length) return '<div class="car-empty">' + icon("search") + "<span>Sin marcas para esa búsqueda.</span></div>";
+    return rows.map((b) => '<button type="button" class="car-option' + (ui.catalogBrand === b.brand ? " is-active" : "") + '" data-action="catalog-brand" data-brand="' + esc(b.brand) + '">' +
+      '<span class="car-option-main"><span class="car-option-title">' + esc(b.brand) + "</span>" +
+      '<span class="car-option-sub">' + b.models.length + " modelos en el catálogo</span></span>" +
+      (ui.catalogBrand === b.brand ? icon("check") : icon("next")) + "</button>").join("");
+  }
+
+  function catalogModelListHTML() {
+    const q = normalize(ui.catalogSearch.model).trim();
+    const rows = catalogModelRows().filter((row) => modelRowMatches(row, q));
+    if (!rows.length) return '<div class="car-empty">' + icon("search") + "<span>Sin versiones para esa búsqueda. Prueba otra palabra o usa los datos manuales.</span></div>";
+    let out = "";
+    let group = "";
+    rows.forEach((row) => {
+      if (row.model !== group) {
+        group = row.model;
+        out += '<div class="car-group-label">' + esc(row.model) + "</div>";
+      }
+      if (row.gen) {
+        const active = ui.catalogModel === row.model && ui.catalogGen === row.index;
+        out += '<button type="button" class="car-option car-option--gen' + (active ? " is-active" : "") + '" data-action="catalog-generation" data-model="' + esc(row.model) + '" data-gen="' + row.index + '">' +
+          '<span class="car-option-main"><span class="car-option-title">' + esc(row.gen.name + " (" + row.gen.chassis + ")") + "</span>" +
+          '<span class="car-option-sub">' + esc((row.gen.body || "Carrocería única") + " · " + generationRange(row.gen)) + "</span></span>" +
+          '<span class="car-option-meta">' + esc(row.gen.code) + "</span></button>";
+      } else {
+        const starts = row.variants.map((v) => Number(v.from)).filter(Boolean);
+        const ends = row.variants.map((v) => Number(v.to)).filter(Boolean);
+        const range = starts.length ? dateRangeText(Math.min.apply(null, starts), 0, Math.max.apply(null, ends), 0) : "";
+        const meta = row.variants.length + " motorizaciones" + (range ? " · " + range : "");
+        out += '<button type="button" class="car-option' + (ui.catalogModel === row.model && ui.catalogGen === -1 ? " is-active" : "") + '" data-action="catalog-generation" data-model="' + esc(row.model) + '" data-gen="-1">' +
+          '<span class="car-option-main"><span class="car-option-title">' + esc(row.model) + "</span>" +
+          '<span class="car-option-sub">' + esc(meta) + "</span></span>" +
+          (row.variants.length ? icon("next") : "") + "</button>";
+      }
+    });
+    return out;
+  }
+
+  function catalogEngineListHTML() {
+    const all = catalogEngineList();
+    const q = normalize(ui.catalogSearch.engine).trim();
+    const list = all.map((e, i) => ({ e, i })).filter((item) => engineMatches(item.e, q));
+    if (!list.length) {
+      return '<div class="car-empty">' + icon("alert") + "<span>" + (all.length ? "Sin motorizaciones para esa búsqueda." : "Sin motorizaciones detalladas para esta versión. Usa los datos manuales.") + "</span></div>";
+    }
+    return list.map((item) => {
+      const e = item.e;
+      const active = ui.catalogEng === item.i;
+      const meta = [e.cc ? fmtKm(e.cc) + " cc" : "", fuelLabel(e.fuel), e.gearbox || "", engineRange(e)].filter(Boolean).join(" · ");
+      return '<button type="button" class="car-option' + (active ? " is-active" : "") + '" data-action="catalog-engine" data-eng="' + item.i + '">' +
+        '<span class="car-option-main"><span class="car-option-title">' + esc(e.label) + " <em>" + esc(enginePowerText(e)) + "</em></span>" +
+        '<span class="car-option-sub">' + esc(meta) + "</span></span>" +
+        (e.code ? '<span class="car-option-meta">' + esc(e.code) + "</span>" : "") + "</button>";
+    }).join("");
+  }
+
+  function catalogPanelHTML(step) {
+    const kinds = ["brand", "model", "engine"];
+    const kind = kinds[step];
+    const config = {
+      brand: { placeholder: "Buscar marca", list: catalogBrandListHTML },
+      model: { placeholder: "Buscar modelo o versión", list: catalogModelListHTML },
+      engine: { placeholder: "Buscar motorización", list: catalogEngineListHTML }
+    }[kind];
+    return '<div class="car-panel">' +
+      '<div class="car-search">' + icon("search") +
+      '<input type="search" autocomplete="off" spellcheck="false" placeholder="' + config.placeholder + '" value="' + esc(ui.catalogSearch[kind]) + '" data-catalog-search="' + kind + '">' +
+      "</div>" +
+      '<div class="car-list" id="catalogList">' + config.list() + "</div></div>";
+  }
+
+  function catalogStepHTML(step, label, value, enabled, complete) {
+    const open = ui.catalogStep === step;
+    return '<button type="button" class="car-step' + (open ? " is-open" : "") + (complete ? " is-complete" : "") + (enabled ? "" : " is-disabled") + '" data-action="catalog-step" data-step="' + step + '" aria-expanded="' + (open ? "true" : "false") + '"' + (enabled ? "" : " disabled") + ">" +
+      '<span class="car-step-num">' + (complete ? icon("check") : String(step + 1)) + "</span>" +
+      '<span class="car-step-main"><span class="car-step-label">' + label + "</span>" +
+      '<span class="car-step-value">' + esc(value || "Sin seleccionar") + "</span></span>" +
+      icon("down") + "</button>";
+  }
+
+  function catalogStepsHTML() {
+    const gen = catalogGeneration();
+    const eng = catalogEngine();
+    let modelValue = "";
+    if (gen) modelValue = gen.name + " (" + gen.chassis + ") · " + generationRange(gen);
+    else if (ui.catalogModel) modelValue = ui.catalogModel + " · " + catalogEngineList().length + " motorizaciones";
+    let out = '<div class="car-picker">';
+    out += catalogStepHTML(0, "Elija una marca", ui.catalogBrand, true, !!ui.catalogBrand);
+    if (ui.catalogStep === 0) out += catalogPanelHTML(0);
+    out += catalogStepHTML(1, "Elija un modelo", modelValue, !!ui.catalogBrand, !!ui.catalogModel);
+    if (ui.catalogStep === 1) out += catalogPanelHTML(1);
+    out += catalogStepHTML(2, "Elija un tipo de motor", engineTitle(eng), !!ui.catalogModel, !!eng);
+    if (ui.catalogStep === 2) out += catalogPanelHTML(2);
+    return out + "</div>";
+  }
+
+  function catalogSummaryHTML() {
+    const gen = catalogGeneration();
+    const eng = catalogEngine();
+    if (!eng) return "";
+    const profile = catalogActiveProfile();
+    const known = catalogKnownProfile();
+    const parts = profileComponents(profile);
+    const cells = [
+      ["Generación", gen ? gen.name : ui.catalogModel],
+      ["Carrocería", gen ? gen.body : "—"],
+      ["Chasis", gen ? gen.chassis : "—"],
+      ["Producción", gen ? generationRange(gen) : "—"],
+      ["Motor", eng.label],
+      ["Potencia", enginePowerText(eng)],
+      ["Cilindrada", eng.cc ? fmtKm(eng.cc) + " cc" : "—"],
+      ["Combustible", fuelLabel(eng.fuel)],
+      ["Cambio", eng.gearbox || "—"],
+      ["Código motor", eng.code || "—"],
+      ["Motorización", engineRange(eng)],
+      ["Mantenimiento", parts.length + " componentes"]
+    ];
+    return '<div class="car-summary">' +
+      '<div class="car-summary-head"><div>' +
+      '<span class="car-summary-kicker">' + esc(ui.catalogBrand) + "</span>" +
+      '<b class="car-summary-title">' + esc(ui.catalogModel) + "</b>" +
+      '<span class="car-summary-sub">' + esc(gen ? gen.name + " (" + gen.chassis + ")" : ui.catalogModel) + "</span></div>" +
+      '<span class="car-summary-tag">' + (known ? "Perfil " + esc(known.code) : "Genérico") + "</span></div>" +
+      '<div class="car-summary-grid">' + cells.map(([k, val]) => "<div><span>" + esc(k) + "</span><b>" + esc(val) + "</b></div>").join("") + "</div>" +
+      '<div class="car-summary-note">' + icon(known ? "check" : "info") + "<span>" + (known
+        ? "Se cargarán los intervalos y piezas específicas del motor " + esc(known.code) + "."
+        : "Este motor no tiene perfil específico: se usarán intervalos genéricos de " + esc(fuelLabel(eng.fuel).toLowerCase()) + ".") + "</span></div>" +
+      '<button type="button" class="car-reset" data-action="catalog-reset">' + icon("retry") + " Cambiar vehículo</button></div>";
+  }
+
+  function catalogManualHTML() {
+    const fields = [
+      ["catalogBrandCustom", "Marca", "Isuzu", ui.catalogBrandCustom],
+      ["catalogModelCustom", "Modelo", "D-Max", ui.catalogModelCustom]
+    ];
+    return '<div class="car-manual">' +
+      '<div class="section-head" style="margin-bottom:9px"><span class="section-title">Datos manuales</span><span class="mono-label">Sin catálogo</span></div>' +
+      '<div class="form-hint" style="margin-top:0;margin-bottom:10px">' + icon("info") + "<span>El catálogo demo no cubre esta versión. Rellena los datos técnicos: se usará un perfil genérico de mantenimiento.</span></div>" +
+      '<div class="field-row">' + fields.map(([id, label, placeholder, value]) => '<div class="field"><label for="' + id + '">' + label + "</label>" +
+        '<input id="' + id + '" type="text" placeholder="' + placeholder + '" value="' + esc(value) + '" autocomplete="off"></div>').join("") + "</div>" +
+      '<div class="field-row"><div class="field"><label for="catalogFuel">Combustible</label><select id="catalogFuel">' +
+      Object.keys(DB.fuelProfiles).map((key) => '<option value="' + key + '"' + (ui.catalogFuel === key ? " selected" : "") + ">" + esc(DB.fuelProfiles[key].label) + "</option>").join("") +
+      '</select></div><div class="field"><label for="catalogCc">Cilindrada <small>cc</small></label>' +
+      '<input id="catalogCc" type="number" min="0" max="10000" placeholder="1896" value="' + esc(ui.catalogCc) + '" autocomplete="off"></div></div>' +
+      '<div class="field-row"><div class="field"><label for="catalogPower">Potencia <small>CV</small></label>' +
+      '<input id="catalogPower" type="number" min="0" max="2000" placeholder="163" value="' + esc(ui.catalogPower) + '" autocomplete="off"></div>' +
+      '<div class="field"><label for="catalogGearbox">Cambio</label><input id="catalogGearbox" type="text" placeholder="Manual 6v" value="' + esc(ui.catalogGearbox) + '" autocomplete="off"></div></div>' +
+      '<div class="field-row"><div class="field"><label for="catalogCode">Código motor <small>Opcional</small></label>' +
+      '<input id="catalogCode" type="text" placeholder="RZ4E" value="' + esc(ui.catalogCode) + '" style="font-family:var(--mono);text-transform:uppercase" autocomplete="off"></div>' +
+      '<div class="field"><label for="catalogVersion">Versión / acabado <small>Opcional</small></label>' +
+      '<input id="catalogVersion" type="text" placeholder="LSX" value="' + esc(ui.catalogVersion) + '" autocomplete="off"></div></div>' +
+      '<button type="button" class="car-manual-back" data-action="catalog-catalog">' + icon("back") + " Volver al selector de catálogo</button></div>";
+  }
+
+  function catalogPickerHTML() {
+    if (ui.addMode !== "catalog") return "";
+    if (catalogUsesManual()) return catalogManualHTML();
+    const totals = catalogTotals();
+    return catalogStepsHTML() + catalogSummaryHTML() +
+      '<div class="car-manual-link-wrap"><button type="button" class="car-manual-link" data-action="catalog-manual">' +
+      icon("info") + " ¿No encuentras tu coche? Introducir datos manualmente</button></div>" +
+      '<div class="form-hint">' + icon("check") + "<span>Selección automática: marca, versión y motor rellenan año, cilindrada, potencia, cambio y código de motor. Catálogo demo con " + totals.brands + " marcas y " + totals.models + " modelos.</span></div>";
+  }
+
+  function syncCatalogFields() {
+    const alias = document.querySelector('#addVehicleForm input[name="alias"]');
+    if (alias) alias.placeholder = catalogDisplayName() || "Mi coche";
+    const hint = document.getElementById("componentHint");
+    if (hint) {
+      const count = profileComponents(catalogActiveProfile()).length;
+      const freeAdd = state.pro || state.vehicles.length < 3;
+      hint.textContent = freeAdd
+        ? "Se crearán " + count + " componentes con sus intervalos. Podrás registrar servicios desde el primer día."
+        : "El garaje de la demo incluye 3 vehículos. Activa Pro para añadir más.";
+    }
+  }
+
+  function resetCatalogWizard() {
+    ui.catalogBrand = "";
+    ui.catalogModel = "";
+    ui.catalogBrandCustom = "";
+    ui.catalogModelCustom = "";
+    ui.catalogFuel = "gasolina";
+    ui.catalogVersion = "";
+    ui.catalogYear = "";
+    ui.catalogStep = 0;
+    ui.catalogSearch = { brand: "", model: "", engine: "" };
+    ui.catalogGen = -1;
+    ui.catalogEng = -1;
+    ui.catalogManual = false;
+    ui.catalogCc = "";
+    ui.catalogPower = "";
+    ui.catalogCode = "";
+    ui.catalogGearbox = "";
+  }
+
   function plateStatusHTML() {
     if (!ui.plateValue) return icon("info") + "<span>Formato actual: 1234 ABC (sin vocales ni Ñ). También se aceptan matrículas históricas.</span>";
     if (!ui.plateValid) return icon("alert") + "<span>Matrícula no válida. Ejemplo: 4821 KTR.</span>";
@@ -1179,12 +1761,25 @@
   }
 
   function renderAddVehicle() {
-    const profile = DB.engineProfiles.find((p) => p.code === ui.engineChoice) || DB.engineProfiles[0];
-    const template = profileTemplate(profile);
+    const catalogMode = ui.addMode === "catalog";
+    const profile = catalogMode ? catalogActiveProfile() : (DB.engineProfiles.find((p) => p.code === ui.engineChoice) || DB.engineProfiles[0]);
+    const template = catalogMode ? null : profileTemplate(profile);
     const components = profileComponents(profile);
     const freeAdd = state.pro || state.vehicles.length < 3;
+    const picker = catalogPickerHTML();
+    const engineBlock = '<div class="engine-list">' + DB.engineProfiles.map((p) =>
+      '<button class="veh-option engine-option ' + (ui.engineChoice === p.code ? "is-active" : "") + '" data-action="engine-profile" data-engine="' + p.code + '">' +
+      '<span class="engine-radio" aria-hidden="true"></span>' +
+      '<span class="veh-option-main"><b>' + esc(p.label) + "</b><span>" + esc(p.spec) + "</span></span>" +
+      '<span class="tag">' + esc(p.code) + "</span></button>"
+    ).join("") + "</div>" +
+      '<div class="form-hint">' + icon("info") + "<span>La matrícula no se consulta en la DGT: no hay una API pública gratuita por matrícula. Elige el perfil del motor para cargar sus intervalos y fallos típicos.</span></div>";
+    const yearValue = catalogMode ? (ui.catalogYear || "") : profile.year;
+    const missingEngine = catalogMode && !ui.catalogManual && !catalogEngine();
+    const modeLabel = catalogMode ? (ui.catalogManual ? "Manual · datos técnicos" : "Marca · versión · motor") : "Perfil de motor";
+
     return '<div class="screen-head"><button class="icon-btn" data-action="back" aria-label="Atrás">' + icon("back") + "</button>" +
-      '<div class="head-main"><div class="eyebrow">Alta por matrícula</div><h1 class="screen-title">Añadir vehículo</h1></div></div>' +
+      '<div class="head-main"><div class="eyebrow">Alta de vehículo</div><h1 class="screen-title">Añadir vehículo</h1></div></div>' +
 
       '<div class="card card--pad"><div class="section-head" style="margin-bottom:9px"><span class="section-title">Matrícula</span><span class="chip">' + (freeAdd ? "Incluido" : "Requiere Pro") + "</span></div>" +
       '<div class="field"><label for="plateInput">Matrícula del coche <small>España</small></label>' +
@@ -1192,24 +1787,22 @@
       '<div class="form-hint" id="plateStatus">' + plateStatusHTML() + "</div>" +
       '<button class="btn btn--sm btn--block" style="margin-top:8px" data-action="fill-plate">' + icon("bolt") + " Usar matrícula de ejemplo</button></div>" +
 
-      '<section class="section"><div class="section-head"><span class="section-title">Motor y plataforma</span><span class="mono-label">Perfil</span></div>' +
-      '<div class="engine-list">' + DB.engineProfiles.map((p) =>
-        '<button class="veh-option engine-option ' + (ui.engineChoice === p.code ? "is-active" : "") + '" data-action="engine-profile" data-engine="' + p.code + '">' +
-        '<span class="engine-radio" aria-hidden="true"></span>' +
-        '<span class="veh-option-main"><b>' + esc(p.label) + "</b><span>" + esc(p.spec) + "</span></span>" +
-        '<span class="tag">' + esc(p.code) + "</span></button>"
-      ).join("") + "</div>" +
-      '<div class="form-hint">' + icon("info") + "<span>La matrícula no se consulta en la DGT: no hay una API pública gratuita por matrícula. Elige el perfil del motor para cargar sus intervalos y fallos típicos.</span></div></section>" +
+      '<section class="section"><div class="section-head"><span class="section-title">Vehículo</span><span class="mono-label">' + modeLabel + "</span></div>" +
+      '<div class="segment" style="margin-top:0"><button class="' + (catalogMode ? "is-active" : "") + '" data-action="add-mode" data-mode="catalog">Catálogo</button>' +
+      '<button class="' + (catalogMode ? "" : "is-active") + '" data-action="add-mode" data-mode="engine">Motor</button></div>' +
+      (catalogMode ? picker + (missingEngine ? '<div class="form-hint">' + icon("alert") + "<span>Completa los tres pasos: marca, versión y tipo de motor. El año y la ficha técnica se rellenan solos.</span></div>" : "") : engineBlock) + "</section>" +
 
       '<form id="addVehicleForm" class="form-card">' +
-      '<div class="field"><label>Alias</label><input name="alias" type="text" placeholder="' + esc(template ? template.name : profile.name) + '"></div>' +
-      '<div class="field-row"><div class="field"><label>Año</label><input name="year" type="number" min="1950" max="2027" value="' + profile.year + '" required></div>' +
+      '<div class="field"><label>Alias</label><input name="alias" type="text" placeholder="' + esc(catalogMode ? catalogDisplayName() : (template ? template.name : profile.name)) + '"></div>' +
+      '<div class="field-row">' +
+      '<div class="field"><label for="catalogYearInput">Año <small>' + (catalogMode && !ui.catalogManual ? "Auto" : "Requerido") + '</small></label>' +
+      '<input id="catalogYearInput" name="year" type="number" min="1950" max="2027" value="' + esc(yearValue) + '" placeholder="' + (catalogMode ? "Elige el motor" : "") + '" required></div>' +
       '<div class="field"><label>Kilometraje actual</label><input name="km" type="number" min="0" step="1" value="60000" required></div></div>' +
       '<div class="field"><label>VIN <small>Opcional</small></label><input name="vin" type="text" maxlength="17" placeholder="17 caracteres" style="font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase"></div>' +
-      '<div class="form-hint">' + icon(state.pro ? "check" : "lock") + "<span>" + (freeAdd ? "Se crearán " + components.length + " componentes con sus intervalos. Podrás registrar servicios desde el primer día." : "El garaje de la demo incluye 3 vehículos. Activa Pro para añadir más.") + "</span></div>" +
+      '<div class="form-hint">' + icon(state.pro ? "check" : "lock") + '<span id="componentHint">' + (freeAdd ? "Se crearán " + components.length + " componentes con sus intervalos. Podrás registrar servicios desde el primer día." : "El garaje de la demo incluye 3 vehículos. Activa Pro para añadir más.") + "</span></div>" +
       '<button class="btn btn--primary btn--block" type="submit" style="margin-top:11px">' + icon(freeAdd ? "plus" : "lock") + " Añadir al garaje</button></form>" +
 
-      '<div class="disclaimer">' + icon("info") + "<span>Demo: la matrícula se valida y se guarda en tu navegador. El perfil de motor se elige manualmente; no se simula una consulta real a la DGT.</span></div>";
+      '<div class="disclaimer">' + icon("info") + "<span>" + (catalogMode ? "Selección automática tipo catálogo: no se consulta la DGT ni un decodificador VIN externo. Revisa el año y guarda." : "Demo: la matrícula se valida y se guarda en tu navegador. El perfil de motor se elige manualmente; no se simula una consulta real a la DGT.") + "</span></div>";
   }
 
   /* ------------------------------------------------------------------------
@@ -1270,16 +1863,21 @@
 
   function openFaultSheet(id) {
     const v = currentVehicle();
-    const f = (DB.faults[v.engineCode] || []).find((x) => x.id === id);
+    const f = faultsFor(v).find((x) => x.id === id);
     if (!f) return;
     const sev = sevMeta(f.severity);
-    openSheet(sheetHeader("Fallo común · " + v.engineCode, f.title) +
-      '<div class="sheet-scroll"><div class="chip-row" style="margin-bottom:11px"><span class="tag ' + sev.cls + '">' + sev.label + '</span><span class="chip">' + fmtKm(f.cases) + ' casos</span><span class="chip">' + esc(f.band) + "</span></div>" +
+    const comp = f.part ? v.components.find((c) => c.oem === f.part) : null;
+    openSheet(sheetHeader("Fallo documentado · " + vehicleModelLabel(v), f.title) +
+      '<div class="sheet-scroll"><div class="chip-row" style="margin-bottom:11px"><span class="tag ' + sev.cls + '">' + sev.label + "</span>" +
+      (f.years ? '<span class="chip">' + f.years[0] + "–" + f.years[1] + "</span>" : "") +
+      (f.km ? '<span class="chip">' + esc(f.km) + "</span>" : "") +
+      '<span class="chip">' + esc(v.engineCode) + "</span></div>" +
       '<div class="sheet-note" style="margin-top:0"><b style="color:var(--text)">Síntoma típico</b><br>' + esc(f.symptom) + "</div>" +
       '<div class="card card--pad" style="margin-top:9px"><span class="mono-label">Comprobación recomendada</span><p class="tiny" style="margin-top:5px;color:var(--dim);line-height:1.55">' + esc(f.check) + "</p>" +
-      '<div class="row" style="margin-top:9px"><span class="chip">Ref. ' + esc(f.part) + "</span><span class=\"chip\">" + esc(v.chassis) + "</span></div></div>" +
+      (f.part ? '<div class="row" style="margin-top:9px"><span class="chip">Ref. ' + esc(f.part) + '</span><span class="chip">' + esc(v.chassis) + "</span></div>" : "") + "</div>" +
+      '<div class="fault-source">' + icon("shield") + '<div><span class="mono-label">Fuente verificada</span>' + faultSourceHTML(f) + "</div></div>" +
       '<div class="row" style="margin-top:12px;gap:6px"><button class="btn btn--primary" style="flex:1" data-action="diag-fault" data-id="' + f.id + '">' + icon("mic") + " Grabar este ruido</button>" +
-      '<button class="btn btn--ghost" data-action="search-component" data-id="' + (v.components.find((c) => c.oem === f.part) || v.components[0]).id + '">' + icon("search") + " Pieza</button></div>" +
+      (comp ? '<button class="btn btn--ghost" style="flex:1" data-action="search-component" data-id="' + comp.id + '">' + icon("search") + " Pieza</button>" : "") + "</div>" +
       '<button class="btn btn--ghost btn--block" style="margin-top:6px" data-action="close-sheet">Cerrar</button></div>');
   }
 
@@ -1309,10 +1907,9 @@
       '<button class="profile-row" data-action="install-app">' + icon("download") + "<span>Instalar en el móvil</span>" + icon("next") + "</button>" +
       '<div class="profile-row" style="cursor:default">' + icon("bell") + "<span>Recordatorios por km</span>" +
       '<button class="switch ' + (state.reminders ? "is-on" : "") + '" data-action="toggle-reminders" aria-label="Recordatorios"></button></div>' +
-      '<button class="profile-row" data-action="toast" data-msg="Ajustes de demo">' + icon("settings") + "<span>Ajustes</span>" + icon("next") + "</button>" +
-      '<button class="profile-row" data-action="toast" data-msg="Privacidad: tus datos se guardan en el navegador">' + icon("shield") + "<span>Privacidad y datos</span>" + icon("next") + "</button>" +
+      '<button class="profile-row" data-action="toast" data-msg="Privacidad: el audio y la foto solo se procesan al analizar y no se guardan en la app">' + icon("shield") + "<span>Privacidad y datos</span>" + icon("next") + "</button>" +
       '<button class="btn btn--ghost btn--block" style="margin-top:14px;color:var(--danger);border-color:rgba(255,82,82,.25)" data-action="reset-demo">' + icon("retry") + " Reiniciar demo</button>" +
-      '<p class="pro-legal">Prototipo local · sin backend ni pagos reales.</p></div>');
+      '<p class="pro-legal">Prototipo · sin pagos reales.</p></div>');
   }
 
   function openVehicleSwitcher() {
@@ -1320,7 +1917,7 @@
     const rows = state.vehicles.map((veh, i) => {
       const locked = !state.pro && !!veh.demoLocked;
       return '<button class="veh-option ' + (veh.id === active.id ? "is-active" : "") + '" data-action="' + (locked ? "locked-vehicle" : "switch-vehicle") + '" data-id="' + veh.id + '">' +
-        '<img src="' + veh.image + '" alt="">' +
+        '<img class="vehicle-photo" src="' + esc(vehicleImageSrc(veh)) + '"' + vehiclePhotoAttrs(veh) + ' alt="">' +
         '<span class="veh-option-main"><b>' + esc(veh.name) + "</b><span>" + esc(veh.engineCode) + " · " + fmtKm(veh.km) + " km</span></span>" +
         (locked ? '<span class="tag tag--accent">Pro</span>' : veh.id === active.id ? '<span class="tag tag--ok">Activo</span>' : '<span class="tag">' + esc(veh.plate) + "</span>") +
         "</button>";
@@ -1454,26 +2051,6 @@
     return sorted[Math.floor(sorted.length / 2)];
   }
 
-  function classifyFrequency(hz) {
-    if (!hz) return null;
-    if (hz < 900) return "chain";
-    if (hz < 2800) return "alt";
-    return "vac";
-  }
-
-  function diagnosticResults() {
-    const base = DB.diagnostics[ui.params.fault] || DB.diagnostics.default;
-    const summary = ui.audioSummary;
-    if (!summary || !summary.real || ui.params.fault) return base;
-    const guess = classifyFrequency(summary.freq);
-    const top = base.find((r) => r.id === guess);
-    if (!top) return base;
-    const rest = base.filter((r) => r !== top);
-    return [Object.assign({}, top, { pct: 64, measured: true })].concat(
-      rest.map((r, i) => Object.assign({}, r, { pct: i === 0 ? 22 : 14 }))
-    );
-  }
-
   function armRecTimer() {
     if (ui.recTimer) clearTimeout(ui.recTimer);
     ui.recTimer = setTimeout(() => {
@@ -1481,21 +2058,58 @@
     }, (REC_SECONDS + 0.3) * 1000);
   }
 
+  function resetAiState() {
+    ui.aiResult = null;
+    ui.aiError = "";
+    ui.aiBusy = false;
+    ui.aiRound = 0;
+    ui.aiAnswers = {};
+    ui.aiFollowup = "";
+    ui.aiFollowupBusy = false;
+    ui.aiImage = null;
+    ui.aiImageStatus = "idle";
+  }
+
+  function resetDiagnosis() {
+    stopMedia();
+    resetAiState();
+    ui.diagStage = "idle";
+    ui.visualStage = "idle";
+    ui.audioSummary = null;
+    ui.audioWav = "";
+    ui.pcmChunks = [];
+    ui.pcmTotal = 0;
+    ui.capturedFrame = "";
+    ui.visualMetrics = null;
+    ui.cameraError = "";
+    if (ui.audioURL) {
+      try { URL.revokeObjectURL(ui.audioURL); } catch (err) { /* noop */ }
+      ui.audioURL = null;
+    }
+  }
+
   function startRecording() {
     if (ui.diagStage === "recording" || ui.micMode === "starting") return;
-    ui.diagUnlocked = false;
+    resetAiState();
     ui.audioSummary = null;
     ui.audioSamples = [];
     ui.micHzSamples = [];
     ui.micPeakDb = -100;
     ui.micHz = 0;
     ui.micMode = "starting";
+    ui.audioUploadName = "";
+    ui.pcmChunks = [];
+    ui.pcmTotal = 0;
+    ui.audioWav = "";
     if (ui.audioURL) {
       try { URL.revokeObjectURL(ui.audioURL); } catch (err) { /* noop */ }
       ui.audioURL = null;
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      startSimulatedRecording("Sin acceso al micrófono · análisis simulado");
+      ui.micMode = "idle";
+      ui.aiError = "Este navegador no permite usar el micrófono. Sube un audio grabado.";
+      ui.diagStage = "error";
+      render();
       return;
     }
     toast("Solicitando permiso de micrófono…", "mic");
@@ -1524,8 +2138,25 @@
         analyser.smoothingTimeConstant = 0.55;
         source.connect(analyser);
         ui.analyser = analyser;
+        const processor = ui.audioCtx.createScriptProcessor(4096, 1, 1);
+        const mute = ui.audioCtx.createGain();
+        mute.gain.value = 0;
+        source.connect(processor);
+        processor.connect(mute);
+        mute.connect(ui.audioCtx.destination);
+        processor.onaudioprocess = (event) => {
+          if (ui.diagStage !== "recording") return;
+          const channel = event.inputBuffer.getChannelData(0);
+          const max = Math.floor(PitBoxAI.maxAudioSeconds * (ui.audioCtx ? ui.audioCtx.sampleRate : 48000));
+          if (ui.pcmTotal >= max) return;
+          const take = channel.length > max - ui.pcmTotal ? channel.subarray(0, max - ui.pcmTotal) : channel;
+          ui.pcmChunks.push(new Float32Array(take));
+          ui.pcmTotal += take.length;
+        };
+        ui.processor = processor;
       } catch (err) {
         ui.analyser = null;
+        ui.processor = null;
       }
       try {
         if (window.MediaRecorder) {
@@ -1542,7 +2173,7 @@
           rec.start();
           ui.recorder = rec;
         }
-      } catch (err) { /* la grabación es opcional, el análisis continúa */ }
+      } catch (err) { /* la reproducción es opcional */ }
       ui.recStart = performance.now();
       ui.diagStage = "recording";
       render();
@@ -1550,18 +2181,11 @@
       toast("Micrófono activo · captura real de 8 s", "mic");
     }).catch((err) => {
       const reason = err && err.name === "NotAllowedError" ? "Permiso de micrófono denegado" : "No se pudo abrir el micrófono";
-      startSimulatedRecording(reason + " · análisis simulado");
+      ui.micMode = "idle";
+      ui.aiError = reason + ". Puedes subir un audio grabado.";
+      ui.diagStage = "error";
+      render();
     });
-  }
-
-  function startSimulatedRecording(message) {
-    stopMicCapture(false);
-    ui.micMode = "sim";
-    ui.recStart = performance.now();
-    ui.diagStage = "recording";
-    render();
-    armRecTimer();
-    toast(message, "alert");
   }
 
   function startWave() {
@@ -1705,33 +2329,147 @@
     if (ui.raf) cancelAnimationFrame(ui.raf);
     ui.raf = null;
     if (ui.recTimer) { clearTimeout(ui.recTimer); ui.recTimer = null; }
-    ui.diagStage = "analyzing";
-    if (ui.micMode === "real") {
-      const summary = {
-        real: true,
-        peakDb: ui.micPeakDb,
-        freq: median(ui.micHzSamples.filter(Boolean)),
-        duration: Math.min(REC_SECONDS, Math.max(0.4, (performance.now() - ui.recStart) / 1000)),
-        sampleRate: ui.audioCtx ? ui.audioCtx.sampleRate : 0,
-        ambient: !!ui.ambientFilter,
-        band: !!ui.bandFilter
-      };
-      ui.audioSummary = summary;
-      ui.diagUnlocked = false;
-      stopMicCapture(true);
-    } else {
-      ui.audioSummary = null;
-      stopMicCapture(false);
+    if (ui.micMode !== "real") { ui.micMode = "idle"; return; }
+    let wav = "";
+    if (ui.pcmChunks.length) {
+      const rate = ui.audioCtx ? ui.audioCtx.sampleRate : 48000;
+      wav = PitBoxAI.encodeWav(PitBoxAI.mergedFloat32(ui.pcmChunks), rate);
     }
+    const duration = Math.min(REC_SECONDS, Math.max(0.4, (performance.now() - ui.recStart) / 1000));
+    ui.audioSummary = {
+      real: true,
+      uploaded: false,
+      peakDb: ui.micPeakDb,
+      freq: median(ui.micHzSamples.filter(Boolean)),
+      duration: duration,
+      sampleRate: ui.audioCtx ? ui.audioCtx.sampleRate : 0,
+      ambient: !!ui.ambientFilter,
+      band: !!ui.bandFilter
+    };
+    ui.audioWav = wav;
+    ui.pcmChunks = [];
+    ui.pcmTotal = 0;
     ui.micMode = "idle";
     ui.micHzSamples = [];
+    stopMicCapture(true);
+    if (!wav) {
+      ui.aiError = "No se pudo procesar el audio del micrófono. Prueba a subir un archivo de audio.";
+      ui.diagStage = "error";
+      render();
+      return;
+    }
+    runAiAnalysis("audio");
+  }
+
+  function captureMetricsText(mode) {
+    if (mode === "audio") {
+      const s = ui.audioSummary;
+      if (!s) return "";
+      const bits = [];
+      if (s.freq) bits.push("frecuencia dominante aproximada " + Math.round(s.freq) + " Hz");
+      if (Number.isFinite(s.peakDb)) bits.push("pico " + s.peakDb.toFixed(1) + " dBFS");
+      if (s.duration) bits.push("duración " + s.duration.toFixed(1) + " s");
+      return "Audio: " + bits.join(", ") + ". Nivel en dBFS sin calibrar; no es una medición de presión sonora.";
+    }
+    const m = ui.visualMetrics;
+    if (!m) return "";
+    return "Foto: " + m.width + "x" + m.height + " px, luminancia media " + Math.round(m.luminance) +
+      "/255, nitidez " + m.sharpness.toFixed(1) + ". Calidad de captura " + m.score + "/100.";
+  }
+
+  function symptomContext() {
+    let text = ui.aiSymptom.trim();
+    if (ui.params && ui.params.fault) {
+      const fault = faultsFor(currentVehicle()).find((x) => x.id === ui.params.fault);
+      if (fault) text = (text ? text + " · " : "") + "Diagnóstico dirigido: " + fault.title + ". " + fault.symptom;
+    }
+    return text;
+  }
+
+  function runAiAnalysis(mode) {
+    resetAiState();
+    ui.aiBusy = true;
+    if (mode === "audio") ui.diagStage = "analyzing";
+    else ui.visualStage = "scanning";
     render();
-    ui.timers.push(setTimeout(() => {
-      if (ui.screen === "diag" && ui.diagMode === "acoustic" && ui.diagStage === "analyzing") {
-        ui.diagStage = "result";
-        render();
-      }
-    }, 2200));
+    PitBoxAI.analyze({
+      vehicle: currentVehicle(),
+      mode: mode,
+      symptom: symptomContext(),
+      audioBase64: ui.audioWav,
+      imageDataUrl: ui.capturedFrame,
+      metrics: captureMetricsText(mode),
+      partHint: (VISUAL_PARTS.find((p) => p[0] === ui.visualPart) || VISUAL_PARTS[0])[1]
+    }).then((result) => {
+      ui.aiResult = result;
+      ui.aiBusy = false;
+      if (mode === "audio") ui.diagStage = "result";
+      else ui.visualStage = "result";
+      render();
+      startIllustration(mode);
+    }).catch((err) => {
+      ui.aiBusy = false;
+      ui.aiError = err && err.message ? err.message : "No se pudo analizar la captura.";
+      if (mode === "audio") ui.diagStage = "error";
+      else ui.visualStage = "error";
+      render();
+    });
+  }
+
+  function runFollowup() {
+    if (!ui.aiResult || ui.aiFollowupBusy) return;
+    const answers = Object.keys(ui.aiAnswers)
+      .sort((a, b) => Number(a) - Number(b))
+      .map((key) => "P" + (Number(key) + 1) + ": " + ui.aiAnswers[key]);
+    if (ui.aiFollowup.trim()) answers.push(ui.aiFollowup.trim());
+    if (!answers.length) {
+      toast("Responde al menos una pregunta", "alert");
+      return;
+    }
+    const mode = ui.diagMode === "visual" ? "image" : "audio";
+    ui.aiFollowupBusy = true;
+    ui.aiError = "";
+    render();
+    PitBoxAI.analyze({
+      vehicle: currentVehicle(),
+      mode: mode,
+      symptom: symptomContext(),
+      audioBase64: ui.audioWav,
+      imageDataUrl: ui.capturedFrame,
+      metrics: captureMetricsText(mode),
+      partHint: (VISUAL_PARTS.find((p) => p[0] === ui.visualPart) || VISUAL_PARTS[0])[1],
+      prior: ui.aiResult,
+      answer: answers.join(" · ")
+    }).then((result) => {
+      ui.aiResult = result;
+      ui.aiRound += 1;
+      ui.aiFollowupBusy = false;
+      ui.aiAnswers = {};
+      ui.aiFollowup = "";
+      render();
+      startIllustration(mode);
+    }).catch((err) => {
+      ui.aiFollowupBusy = false;
+      ui.aiError = err && err.message ? err.message : "No se pudo afinar el diagnóstico.";
+      render();
+    });
+  }
+
+  function saveReport(mode) {
+    if (!ui.aiResult) return;
+    if (!Array.isArray(state.diagnoses)) state.diagnoses = [];
+    state.diagnoses.unshift({
+      id: uid(),
+      vehicleId: currentVehicle().id,
+      createdAt: Date.now(),
+      date: isoToday(),
+      mode: mode,
+      symptom: ui.aiSymptom,
+      result: ui.aiResult
+    });
+    state.diagnoses = state.diagnoses.slice(0, 20);
+    save();
+    toast("Informe guardado en el libro del vehículo", "check");
   }
 
   function playDiagAudio() {
@@ -1745,26 +2483,8 @@
       } catch (err) {
         toast("No se pudo reproducir la grabación", "alert");
       }
-    } else if (ui.audioSummary && ui.audioSummary.real) {
-      toast("Grabación liberada al salir · reproducción simulada", "info");
-    }
-  }
-
-  function unlockDiag() {
-    if (state.pro) {
-      ui.diagUnlocked = true;
-      render();
-      return;
-    }
-    if (state.diagCredits > 0) {
-      state.diagCredits -= 1;
-      save();
-      ui.diagUnlocked = true;
-      render();
-      toast("Informe desbloqueado con tu pase", "check");
     } else {
-      go("pro");
-      toast("Necesitas un pase o Pro para el informe completo", "lock");
+      toast("La grabación ya no está disponible en esta sesión", "info");
     }
   }
 
@@ -1773,7 +2493,7 @@
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       ui.cameraError = "Este navegador no permite abrir la cámara";
       render();
-      toast(ui.cameraError + " · puedes usar la referencia demo", "alert");
+      toast(ui.cameraError + " · usa «Subir una foto»", "alert");
       return;
     }
     ui.cameraStarting = true;
@@ -1799,7 +2519,7 @@
       ui.cameraStarting = false;
       ui.cameraError = err && err.name === "NotAllowedError" ? "Permiso de cámara denegado" : "No se pudo abrir la cámara";
       render();
-      toast(ui.cameraError + " · captura demo disponible", "alert");
+      toast(ui.cameraError + " · usa «Subir una foto»", "alert");
     });
   }
 
@@ -1856,30 +2576,79 @@
 
   function captureVisual() {
     if (ui.visualStage === "scanning") return;
-    if (ui.cameraLive) {
-      const video = document.getElementById("cameraFeed");
-      if (!video || !video.videoWidth) {
-        toast("La cámara aún se está iniciando", "alert");
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      const scale = Math.min(1, 1280 / video.videoWidth);
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      try { ui.capturedFrame = canvas.toDataURL("image/jpeg", 0.86); } catch (err) { ui.capturedFrame = ""; }
-      ui.visualMetrics = imageMetrics(canvas);
-      stopCamera();
+    if (!ui.cameraLive) {
+      toast("Activa la cámara o sube una foto", "info");
+      return;
     }
-    ui.visualStage = "scanning";
-    render();
-    ui.timers.push(setTimeout(() => {
-      if (ui.screen === "diag" && ui.diagMode === "visual" && ui.visualStage === "scanning") {
-        ui.visualStage = "result";
+    const video = document.getElementById("cameraFeed");
+    if (!video || !video.videoWidth) {
+      toast("La cámara aún se está iniciando", "alert");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    const scale = Math.min(1, 1280 / video.videoWidth);
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    try { ui.capturedFrame = canvas.toDataURL("image/jpeg", 0.86); } catch (err) { ui.capturedFrame = ""; }
+    ui.visualMetrics = imageMetrics(canvas);
+    stopCamera();
+    if (!ui.capturedFrame) {
+      toast("No se pudo guardar la foto. Prueba otra vez.", "alert");
+      return;
+    }
+    runAiAnalysis("image");
+  }
+
+  function handleVisualFile(file) {
+    if (!file) return;
+    toast("Procesando la foto…", "camera");
+    PitBoxAI.imageFileToDataUrl(file).then((dataUrl) => {
+      const img = new Image();
+      img.onload = () => {
+        ui.capturedFrame = dataUrl;
+        ui.visualMetrics = imageMetrics(img);
+        stopCamera();
+        runAiAnalysis("image");
+      };
+      img.onerror = () => {
+        ui.aiError = "No se pudo leer la imagen.";
+        ui.visualStage = "error";
         render();
+      };
+      img.src = dataUrl;
+    }).catch((err) => {
+      ui.aiError = err && err.message ? err.message : "No se pudo procesar la imagen.";
+      ui.visualStage = "error";
+      render();
+    });
+  }
+
+  function handleAudioFile(file) {
+    if (!file) return;
+    toast("Procesando el audio…", "file");
+    PitBoxAI.audioFileToWav(file).then((converted) => {
+      if (!converted.wav) throw new Error("El archivo no contiene audio utilizable.");
+      ui.audioWav = converted.wav;
+      ui.audioUploadName = file.name || "Audio";
+      if (ui.audioURL) {
+        try { URL.revokeObjectURL(ui.audioURL); } catch (err) { /* noop */ }
       }
-    }, ui.capturedFrame ? 1500 : 1750));
+      ui.audioURL = URL.createObjectURL(file);
+      ui.audioSummary = {
+        real: true,
+        uploaded: true,
+        duration: converted.duration,
+        sampleRate: 16000
+      };
+      ui.micMode = "idle";
+      runAiAnalysis("audio");
+    }).catch((err) => {
+      ui.aiError = err && err.message ? err.message : "No se pudo procesar el audio.";
+      ui.diagStage = "error";
+      render();
+    });
   }
 
 
@@ -1954,10 +2723,84 @@
       go("pro");
       return;
     }
-    const profile = DB.engineProfiles.find((p) => p.code === ui.engineChoice) || DB.engineProfiles[0];
-    const template = profileTemplate(profile);
-    const alias = String(fd.get("alias") || "").trim() || (template ? template.name : profile.name);
-    const year = clamp(parseInt(fd.get("year"), 10) || profile.year, 1950, 2027);
+    const catalogMode = ui.addMode === "catalog";
+    const manualCatalog = catalogMode && catalogUsesManual();
+    const gen = catalogMode ? catalogGeneration() : null;
+    const eng = catalogMode ? catalogEngine() : null;
+    let profile;
+    let template = null;
+    let brandName = "";
+    let modelName = "";
+    let version = "";
+    let engineLabel = "";
+    let displacement = 0;
+    let powerCv = 0;
+    let kw = 0;
+    let gearbox = "";
+    let engineCodeInput = "";
+    let fuelKey = "gasolina";
+    let year;
+    if (catalogMode) {
+      const readCatalog = (id) => {
+        const el = document.getElementById(id);
+        return el ? String(el.value || "").trim() : "";
+      };
+      if (manualCatalog) {
+        brandName = (readCatalog("catalogBrandCustom") || ui.catalogBrandCustom).trim();
+        modelName = (readCatalog("catalogModelCustom") || ui.catalogModelCustom).trim();
+        if (!brandName) {
+          toast("Escribe la marca del vehículo", "alert");
+          return;
+        }
+        if (!modelName) {
+          toast("Escribe el modelo del vehículo", "alert");
+          return;
+        }
+        const fuelField = readCatalog("catalogFuel");
+        fuelKey = DB.fuelProfiles[fuelField] ? fuelField : (DB.fuelProfiles[ui.catalogFuel] ? ui.catalogFuel : "gasolina");
+        year = clamp(parseInt(fd.get("year"), 10) || 0, 1950, 2027);
+        if (!year) {
+          toast("Indica el año del vehículo", "alert");
+          return;
+        }
+        const ccRaw = readCatalog("catalogCc");
+        const powerRaw = readCatalog("catalogPower");
+        version = readCatalog("catalogVersion");
+        gearbox = readCatalog("catalogGearbox");
+        engineCodeInput = readCatalog("catalogCode").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        displacement = ccRaw ? clamp(parseInt(ccRaw, 10) || 0, 0, 10000) : 0;
+        powerCv = powerRaw ? clamp(parseInt(powerRaw, 10) || 0, 0, 2000) : 0;
+        kw = powerCv ? Math.round(powerCv * 0.7355) : 0;
+        profile = (engineCodeInput ? DB.engineProfiles.find((p) => p.code === engineCodeInput) : null) || DB.fuelProfiles[fuelKey] || DB.fuelProfiles.gasolina;
+        const pieces = [];
+        if (displacement) pieces.push((displacement / 1000).toFixed(1) + " L");
+        pieces.push((DB.fuelProfiles[fuelKey] || DB.fuelProfiles.gasolina).label);
+        if (powerCv) pieces.push(powerCv + " CV");
+        engineLabel = pieces.join(" ");
+      } else {
+        if (!eng) {
+          toast("Selecciona la marca, la versión y el motor exacto", "alert");
+          return;
+        }
+        brandName = ui.catalogBrand;
+        modelName = ui.catalogModel;
+        fuelKey = DB.fuelProfiles[eng.fuel] ? eng.fuel : "gasolina";
+        year = clamp(parseInt(fd.get("year"), 10) || Math.min(Number(eng.to) || 2026, 2026), 1950, 2027);
+        displacement = Number(eng.cc) || 0;
+        powerCv = Number(eng.power) || 0;
+        kw = engineKw(eng);
+        gearbox = eng.gearbox || "";
+        engineCodeInput = String(eng.code || "").toUpperCase();
+        profile = (engineCodeInput ? DB.engineProfiles.find((p) => p.code === engineCodeInput) : null) || DB.fuelProfiles[fuelKey] || DB.fuelProfiles.gasolina;
+        version = gen ? gen.name + (gen.body ? " · " + gen.body : "") : modelName;
+        engineLabel = engineFullLabel(eng);
+      }
+    } else {
+      profile = DB.engineProfiles.find((p) => p.code === ui.engineChoice) || DB.engineProfiles[0];
+      template = profileTemplate(profile);
+      year = clamp(parseInt(fd.get("year"), 10) || profile.year, 1950, 2027);
+    }
+    const alias = String(fd.get("alias") || "").trim() || (catalogMode ? brandName + " " + modelName : (template ? template.name : profile.name));
     const km = Math.max(0, parseInt(fd.get("km"), 10) || 0);
     const vin = String(fd.get("vin") || "").trim().toUpperCase();
     if (vin && vin.length !== 17) {
@@ -1991,31 +2834,47 @@
     const nv = {
       id,
       name: alias,
-      trim: template ? template.trim : profile.trim,
+      trim: catalogMode ? (version || "Datos manuales") : (template ? template.trim : profile.trim),
       year,
       plate,
       vin: vin || "—",
-      engineCode: profile.code,
-      engine: template ? template.engine : profile.engine,
-      chassis: template ? template.chassis : profile.chassis,
-      power: template ? template.power : profile.power,
-      torque: template ? template.torque : profile.torque,
-      gearbox: template ? template.gearbox : profile.gearbox,
-      fuel: template ? template.fuel : profile.fuel,
-      oilSpec: template ? template.oilSpec : profile.oilSpec,
+      engineCode: catalogMode ? (engineCodeInput || profile.code) : profile.code,
+      engine: catalogMode ? engineLabel : (template ? template.engine : profile.engine),
+      chassis: catalogMode ? (gen && gen.chassis ? gen.chassis : profile.chassis) : (template ? template.chassis : profile.chassis),
+      power: catalogMode ? (powerCv ? (kw ? kw + " kW / " + powerCv + " CV" : powerCv + " CV") : profile.power) : (template ? template.power : profile.power),
+      torque: catalogMode ? profile.torque : (template ? template.torque : profile.torque),
+      gearbox: catalogMode ? (gearbox || profile.gearbox) : (template ? template.gearbox : profile.gearbox),
+      fuel: catalogMode ? (DB.fuelProfiles[fuelKey] || DB.fuelProfiles.gasolina).label : (template ? template.fuel : profile.fuel),
+      oilSpec: catalogMode ? profile.oilSpec : (template ? template.oilSpec : profile.oilSpec),
       km,
-      image: "assets/car-hero.png",
+      image: PLACEHOLDER_IMAGE,
       accent: profile.accent || "#8e9aa0",
       components,
       services: []
     };
+    if (catalogMode) {
+      nv.brand = brandName;
+      nv.model = modelName;
+      if (displacement) nv.displacement = displacement;
+      if (gen) {
+        nv.generation = gen.name;
+        nv.generationCode = gen.code;
+        nv.body = gen.body;
+        nv.generationYears = generationRange(gen);
+      }
+      if (eng) nv.engineYears = engineRange(eng);
+      if (kw) nv.kw = kw;
+    }
+    nv.photoKey = window.PitBoxCarImage ? window.PitBoxCarImage.keyFor(nv) : "";
     state.vehicles.push(nv);
     state.currentVehicleId = id;
     save();
+    resetCatalogWizard();
     ui.plateValue = "";
     ui.plateValid = false;
     ui.plateDuplicate = false;
     switchTab("garage");
+    resolveVehiclePhoto(nv);
     toast(alias + " añadido · " + plate, "check");
   }
 
@@ -2057,6 +2916,7 @@
   }
 
   document.addEventListener("click", (event) => {
+    if (event.target.closest(".photo-credit")) return;
     const target = event.target.closest("[data-action],[data-screen],[data-flow]");
     if (!target) return;
     if (target.dataset.screen) {
@@ -2156,39 +3016,63 @@
         break;
       case "export-book": openCertSheet(); break;
       case "print-cert": printCertificate(); break;
-      case "diag-mode": ui.diagMode = el.dataset.mode; if (ui.diagMode !== "visual") stopCamera(); render(); break;
+      case "diag-mode": {
+        const next = el.dataset.mode === "visual" ? "visual" : "acoustic";
+        if (next === ui.diagMode) break;
+        resetDiagnosis();
+        ui.diagMode = next;
+        render();
+        break;
+      }
       case "diag-start": startRecording(); break;
       case "diag-stop": stopRecording(); break;
       case "diag-reset":
-        ui.diagStage = "idle";
-        ui.diagUnlocked = false;
         ui.params = {};
-        ui.audioSummary = null;
-        ui.capturedFrame = "";
-        ui.visualMetrics = null;
-        ui.visualStage = "idle";
-        stopMedia();
+        resetDiagnosis();
         render();
         break;
-      case "diag-unlock": unlockDiag(); break;
+      case "diag-retry":
+        if (ui.audioWav) runAiAnalysis("audio");
+        else toast("No queda audio para reintentar", "alert");
+        break;
       case "diag-play": playDiagAudio(); break;
-      case "diag-save": toast("Informe guardado en el historial del vehículo", "check"); break;
+      case "diag-save": saveReport("audio"); break;
+      case "ai-followup": runFollowup(); break;
+      case "ai-answer":
+        ui.aiAnswers[el.dataset.q] = el.dataset.value;
+        render();
+        break;
+      case "audio-upload": {
+        const input = document.getElementById("audioFileInput");
+        if (input) input.click();
+        break;
+      }
+      case "visual-upload": {
+        const input = document.getElementById("visualFileInput");
+        if (input) input.click();
+        break;
+      }
       case "visual-part":
         ui.visualPart = el.dataset.part;
-        ui.visualStage = "idle";
-        ui.capturedFrame = "";
-        ui.visualMetrics = null;
+        resetDiagnosis();
         render();
         break;
       case "camera-start": startCamera(); break;
       case "visual-capture": captureVisual(); break;
       case "visual-reset":
-        ui.visualStage = "idle";
-        ui.capturedFrame = "";
-        ui.visualMetrics = null;
+        resetDiagnosis();
         render();
         break;
-      case "visual-save": toast("Inspección visual añadida al historial", "check"); break;
+      case "visual-retake":
+        resetDiagnosis();
+        render();
+        startCamera();
+        break;
+      case "visual-retry":
+        if (ui.capturedFrame) runAiAnalysis("image");
+        else toast("No queda una foto para reintentar", "alert");
+        break;
+      case "visual-save": saveReport("image"); break;
       case "toggle-filter": {
         const key = el.dataset.key;
         if (key === "ambient") ui.ambientFilter = !ui.ambientFilter;
@@ -2213,6 +3097,80 @@
       case "upload": toast("Prototipo: foto adjunta simulada", "camera"); break;
       case "scan-part": toast("Prototipo: escaneo de código de barras", "scan"); break;
       case "scan-plate": toast("Prototipo: OCR de matrícula con la cámara", "scan"); break;
+      case "add-mode":
+        ui.addMode = el.dataset.mode === "engine" ? "engine" : "catalog";
+        render();
+        break;
+      case "catalog-step": {
+        const step = Number(el.dataset.step);
+        if (step === 1 && !ui.catalogBrand) break;
+        if (step === 2 && !ui.catalogModel) break;
+        ui.catalogStep = step;
+        ui.catalogSearch[["brand", "model", "engine"][step]] = "";
+        ui.catalogScroll = true;
+        render();
+        break;
+      }
+      case "catalog-brand":
+        ui.catalogBrand = el.dataset.brand || "";
+        ui.catalogModel = "";
+        ui.catalogGen = -1;
+        ui.catalogEng = -1;
+        ui.catalogYear = "";
+        ui.catalogFuel = "gasolina";
+        ui.catalogSearch = { brand: "", model: "", engine: "" };
+        ui.catalogStep = 1;
+        ui.catalogScroll = true;
+        render();
+        break;
+      case "catalog-generation":
+        ui.catalogModel = el.dataset.model || "";
+        ui.catalogGen = Number(el.dataset.gen);
+        ui.catalogEng = -1;
+        ui.catalogYear = "";
+        ui.catalogSearch.model = "";
+        ui.catalogSearch.engine = "";
+        ui.catalogStep = 2;
+        ui.catalogScroll = true;
+        render();
+        break;
+      case "catalog-engine": {
+        const eng = catalogEngineList()[Number(el.dataset.eng)];
+        if (!eng) break;
+        ui.catalogEng = Number(el.dataset.eng);
+        ui.catalogFuel = DB.fuelProfiles[eng.fuel] ? eng.fuel : "gasolina";
+        ui.catalogYear = String(Math.min(Number(eng.to) || 2026, 2026));
+        ui.catalogSearch.engine = "";
+        ui.catalogStep = 3;
+        ui.catalogScroll = true;
+        render();
+        break;
+      }
+      case "catalog-reset":
+        ui.catalogBrand = "";
+        ui.catalogModel = "";
+        ui.catalogGen = -1;
+        ui.catalogEng = -1;
+        ui.catalogYear = "";
+        ui.catalogFuel = "gasolina";
+        ui.catalogSearch = { brand: "", model: "", engine: "" };
+        ui.catalogStep = 0;
+        ui.catalogManual = false;
+        ui.catalogScroll = true;
+        render();
+        break;
+      case "catalog-manual":
+        ui.catalogManual = true;
+        ui.catalogStep = 3;
+        ui.catalogScroll = true;
+        render();
+        break;
+      case "catalog-catalog":
+        ui.catalogManual = false;
+        ui.catalogStep = 0;
+        ui.catalogScroll = true;
+        render();
+        break;
       case "fill-plate":
         ui.plateValue = "4821 KTR";
         ui.plateValid = true;
@@ -2250,6 +3208,61 @@
       updatePlateStatus();
       return;
     }
+    if (event.target.matches("[data-ai-symptom]")) {
+      ui.aiSymptom = event.target.value;
+      return;
+    }
+    if (event.target.matches("[data-ai-followup]")) {
+      ui.aiFollowup = event.target.value;
+      return;
+    }
+    if (event.target.matches("[data-catalog-search]")) {
+      const kind = event.target.getAttribute("data-catalog-search");
+      ui.catalogSearch[kind] = event.target.value;
+      const box = document.getElementById("catalogList");
+      if (box) {
+        box.innerHTML = kind === "brand" ? catalogBrandListHTML() : kind === "model" ? catalogModelListHTML() : catalogEngineListHTML();
+      }
+      return;
+    }
+    if (event.target.id === "catalogYearInput") {
+      ui.catalogYear = event.target.value;
+      return;
+    }
+    if (event.target.id === "catalogBrandCustom") {
+      ui.catalogBrandCustom = event.target.value;
+      syncCatalogFields();
+      return;
+    }
+    if (event.target.id === "catalogModelCustom") {
+      ui.catalogModelCustom = event.target.value;
+      syncCatalogFields();
+      return;
+    }
+    if (event.target.id === "catalogVersion") {
+      ui.catalogVersion = event.target.value;
+      return;
+    }
+    if (event.target.id === "catalogCc") {
+      ui.catalogCc = event.target.value;
+      syncCatalogFields();
+      return;
+    }
+    if (event.target.id === "catalogPower") {
+      ui.catalogPower = event.target.value;
+      syncCatalogFields();
+      return;
+    }
+    if (event.target.id === "catalogGearbox") {
+      ui.catalogGearbox = event.target.value;
+      syncCatalogFields();
+      return;
+    }
+    if (event.target.id === "catalogCode") {
+      ui.catalogCode = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      syncCatalogFields();
+      return;
+    }
     if (event.target.matches("[data-search]")) {
       ui.partsQuery = event.target.value;
       updatePartsResults(ui.partsQuery);
@@ -2257,6 +3270,23 @@
   });
 
   document.addEventListener("change", (event) => {
+    if (event.target.id === "visualFileInput") {
+      const file = event.target.files && event.target.files[0];
+      event.target.value = "";
+      handleVisualFile(file);
+      return;
+    }
+    if (event.target.id === "audioFileInput") {
+      const file = event.target.files && event.target.files[0];
+      event.target.value = "";
+      handleAudioFile(file);
+      return;
+    }
+    if (event.target.id === "catalogFuel") {
+      ui.catalogFuel = event.target.value;
+      syncCatalogFields();
+      return;
+    }
     if (event.target.matches("[data-service-component]")) {
       const v = currentVehicle();
       const c = v.components.find((x) => x.id === event.target.value);
@@ -2317,7 +3347,6 @@
     ui.screen = bootScreen;
     if (boot.get("tab")) ui.vehicleTab = boot.get("tab");
     if (boot.get("mode")) ui.diagMode = boot.get("mode");
-    if (boot.get("stage") === "result") { ui.diagStage = "result"; ui.diagUnlocked = true; }
     if (boot.get("q")) ui.partsQuery = boot.get("q");
     if (bootScreen === "part") ui.params = { id: boot.get("id") || "spark" };
     if (bootScreen === "service") ui.params = { componentId: boot.get("component") || "oil" };
@@ -2330,10 +3359,11 @@
   });
   window.addEventListener("appinstalled", () => { deferredInstall = null; });
 
-  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
+  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol) && !/[?&]dev=1/.test(location.search)) {
     navigator.serviceWorker.register("sw.js").catch(() => { /* SW opcional: la app funciona sin él */ });
   }
 
   render();
+  hydrateCarPhotos();
   if (boot.get("cert") === "1") openCertSheet();
 })();
