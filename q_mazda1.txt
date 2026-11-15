@@ -1,0 +1,7 @@
+Mazda2 2004 front
+Mazda2 2008 front
+Mazda2 2015 front
+Mazda3 2005 front
+Mazda3 2010 front
+Mazda3 2015 front
+Mazda3 2020 front
